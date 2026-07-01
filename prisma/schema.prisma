@@ -1,0 +1,77 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum ROLES {
+  ADMIN
+  DRIVER
+  CLIENT
+}
+
+enum STATUS_DRIVERS {
+  AVAILABLE
+  ON_ROUTE
+  OFFLINE
+  SUSPENDED
+}
+
+enum TYPE_VEHICLE {
+  VAN
+  TRUCK
+  MOTORCYCLE
+  CAR
+}
+
+enum STATUS_VEHICLE {
+  ACTIVE
+  MAINTENANCE
+  INACTIVE
+}
+
+model User {
+  id        String @id @default(uuid())
+  firstName String @map("first_name")
+  lastName  String @map("last_name")
+  email     String @unique
+  role      ROLES  @default(CLIENT)
+
+  createdAt DateTime @default(now())
+  updateAt  DateTime @updatedAt
+}
+
+model Drivers {
+  id                 String         @id @default(uuid())
+  idUser             String
+  code               String         @unique
+  phoneNumber        String         @unique @map("phone_number")
+  license_number     String         @unique
+  status             STATUS_DRIVERS
+  current_vehicle_id String
+
+  createdAt DateTime @default(now())
+  updateAt  DateTime @updatedAt
+}
+
+model Vehicles {
+  id          String         @id @default(uuid())
+  plate       String         @unique
+  brand       String
+  model       String
+  year        Int
+  type        TYPE_VEHICLE
+  capacity_kg Decimal
+  status      STATUS_DRIVERS
+
+  createdAt DateTime @default(now())
+  updateAt  DateTime @updatedAt
+}
