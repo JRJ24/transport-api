@@ -1,2 +1,4 @@
 allowBuilds:
-  unrs-resolver: set this to true or false
+  '@prisma/engines': false
+  prisma: false
+  unrs-resolver: false

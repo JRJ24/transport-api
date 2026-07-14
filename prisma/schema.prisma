@@ -10,68 +10,964 @@ generator client {
 
 datasource db {
   provider = "postgresql"
+  schemas  = ["AUTH", "CUSTOMER", "DRIVERS", "VEHICLES", "PRICES", "ORDERS", "TRACKING", "EVIDENCES", "INCIDENTS", "PAIDS", "NOTIFICATIONS", "ADMINISTRATION", "AUDIT", "INTEGRATIONS"]
 }
 
 enum ROLES {
   ADMIN
+  OPERATOR
   DRIVER
-  CLIENT
+  CUSTOMER
+
+  @@schema("AUTH")
 }
 
-enum STATUS_DRIVERS {
+enum STATUS_ACCOUNT {
+  ACTIVE
+  INACTIVE
+  BLOCKED
+
+  @@schema("AUTH")
+}
+
+enum TYPE_CUSTOMER {
+  INDIVIDUAL
+  BUSINESS
+
+  @@schema("CUSTOMER")
+}
+
+enum STATUS_DRIVER {
   AVAILABLE
-  ON_ROUTE
+  BUSY
   OFFLINE
   SUSPENDED
+  VACATION
+
+  @@schema("DRIVERS")
 }
 
-enum TYPE_VEHICLE {
-  VAN
-  TRUCK
-  MOTORCYCLE
-  CAR
+enum VERIFICATION_STATUS {
+  PENDING
+  APPROVED
+  REJECTED
+
+  @@schema("DRIVERS")
+}
+
+enum VERIFICATION_STATUS_DOCS {
+  PENDING
+  APPROVED
+  REJECTED
+
+  @@schema("VEHICLES")
 }
 
 enum STATUS_VEHICLE {
   ACTIVE
   MAINTENANCE
   INACTIVE
+  SUSPENDED
+
+  @@schema("VEHICLES")
 }
 
-model User {
-  id        String @id @default(uuid())
-  firstName String @map("first_name")
-  lastName  String @map("last_name")
-  email     String @unique
-  role      ROLES  @default(CLIENT)
+enum DOCUMENT_TYPE {
+  ID
+  RNC
+  PASSPORT
 
-  createdAt DateTime @default(now())
-  updateAt  DateTime @updatedAt
+  @@schema("CUSTOMER")
 }
 
-model Drivers {
-  id                 String         @id @default(uuid())
-  idUser             String
-  code               String         @unique
-  phoneNumber        String         @unique @map("phone_number")
-  license_number     String         @unique
-  status             STATUS_DRIVERS
-  current_vehicle_id String
+enum DOCUMENT_TYPE_VEHICLE {
+  REGISTRATION
+  INSURANCE
+  INSPECTION
+  OTHER
 
-  createdAt DateTime @default(now())
-  updateAt  DateTime @updatedAt
+  @@schema("VEHICLES")
+}
+
+enum SERVICE_TYPE {
+  INMEDIATE
+  SCHEDULED
+
+  @@schema("ORDERS")
+}
+
+enum STATUS_ORDERS {
+  DRAFT
+  REQUESTED
+  ASSIGNED
+  ACCEPTED
+  IN_PROGRESS
+  DELIVERED
+  CANCELLED
+  FAILED
+
+  @@schema("ORDERS")
+}
+
+enum PAYMENT_STATUS {
+  PENDING
+  AUTHORIZED
+  PAID
+  REFUNDED
+  FAILED
+
+  @@schema("PAIDS")
+}
+
+enum STOP_TYPE {
+  PICKUP
+  DROPOFF
+  INTERMEDIATE
+
+  @@schema("ORDERS")
+}
+
+enum ASSIGNMENT_STATUS {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELLED
+  COMPLETED
+
+  @@schema("ORDERS")
+}
+
+enum EVENT_TYPE {
+  CREATED
+  ASSIGNED
+  ACCEPTED
+  PICKED_UP
+  IN_TRANSIT
+  ARRIVED
+  DELIVERED
+  CANCELLED
+  INCIDENT_REPORTED
+
+  @@schema("INCIDENTS")
+}
+
+enum RESERVATIONS_STATUS {
+  ACTIVE
+  RESCHUDULED
+  CANCELLED
+  EXPIRED
+  COMPLETED
+
+  @@schema("ORDERS")
+}
+
+enum ORDER_CANCELLATION {
+  CUSTOMER_CANCELLED
+  DRIVER_CANCELLED
+  ADMIN_CANCELLED
+  SYSTEM_CANCELLED
+
+  @@schema("ORDERS")
+}
+
+enum TRACKING_SESSIONS {
+  ACTIVE
+  ENDED
+  INTERRUPTED
+
+  @@schema("TRACKING")
+}
+
+enum PROOF_TYPE {
+  PHOTO
+  SIGNATURE
+  QR
+  CODE
+  MIXED
+
+  @@schema("EVIDENCES")
+}
+
+enum VALIDATION {
+  PENDING
+  VALIDATED
+  REJECTED
+
+  @@schema("EVIDENCES")
+}
+
+enum INCIDENT_TYPE {
+  DELAY
+  DAMAGE
+  CUSTOMER_ABSENT
+  WRONG_ADDRESS
+  VEHICLE_PROBLEM
+  OTHER
+
+  @@schema("INCIDENTS")
+}
+
+enum INCIDENT_SEVERITY {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+
+  @@schema("INCIDENTS")
+}
+
+enum INCIDENT_STATUS {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  CLOSED
+
+  @@schema("INCIDENTS")
+}
+
+enum PAYMENT_METHOD {
+  CARD
+  CASH
+  TRANSFER
+  WALLET
+
+  @@schema("PAIDS")
+}
+
+enum STATUS_PAYMENTS {
+  PENDING
+  AUTHORIZED
+  PAID
+  FAILED
+  REFUNDED
+  CANCELLED
+
+  @@schema("PAIDS")
+}
+
+enum PAYMENT_TRANSACTIONS_TYPE {
+  AUTHORIZATION
+  CAPTURE
+  REFUND
+  VOID
+  CANCELLATION_FEE
+
+  @@schema("PAIDS")
+}
+
+enum PAYMENTS_TRANSACTIONS_STATUS {
+  PENDING
+  SUCCESS
+  FAILED
+
+  @@schema("PAIDS")
+}
+
+enum PAYMENTS_REFUND_STATUS {
+  PENDING
+  SUCCESS
+  FAILED
+
+  @@schema("PAIDS")
+}
+
+enum NOTIFICATION_TYPE {
+  ORDER_UPDATE
+  PAYMENT
+  INCIDENT
+  PROMOTION
+  SYSTEM
+
+  @@schema("NOTIFICATIONS")
+}
+
+enum SYSTEM_VALUE {
+  STRING
+  NUMBER
+  BOOLEAN
+  JSON
+
+  @@schema("ADMINISTRATION")
+}
+
+model Users {
+  id           String         @id @default(uuid())
+  fullName     String         @map("full_name")
+  email        String         @unique
+  phone        String         @unique
+  passwordHash String         @map("password_hash")
+  status       STATUS_ACCOUNT @default(ACTIVE)
+  lastLoginAt  DateTime       @map("last_login_at")
+  createdAt    DateTime       @default(now()) @map("created_at")
+  updateAt     DateTime       @updatedAt @map("update_at")
+
+  userRoles         UserRoles[]         @relation("USERS")
+  customerProfiles  CustomerProfiles[]  @relation("USERS_CUSTOMER")
+  driverProfiles    DriverProfiles[]    @relation("DRIVER_USER")
+  orderAssignments  OrderAssignments[]  @relation("assigned_user")
+  deliveryProofs    DeliveryProofs[]    @relation("USER_DELIVERY")
+  attachments       Attachments[]       @relation("Attachments_user")
+  incidents         Incidents[]         @relation("USER_REPORTED")
+  incidentsComments IncidentsComments[] @relation("USER_INCIDENTS_COMMENTS")
+  notifications     NOTIFICATIONS[]     @relation("NOTIFICATIONS_USERS")
+  auditLogs         AuditLogs[]         @relation("AUDIT_USERS")
+  systemParameters  SYSTEM_PARAMETERS[] @relation("UPDATED_USER")
+
+  @@index([email])
+  @@index([phone])
+  @@map("users")
+  @@schema("AUTH")
+}
+
+model Roles {
+  id          String      @id @default(uuid())
+  code        ROLES       @unique
+  name        String
+  description String
+  userRoles   UserRoles[] @relation("ROLES")
+
+  @@map("roles")
+  @@schema("AUTH")
+}
+
+model UserRoles {
+  id        String   @id @default(uuid())
+  userID    String   @map("user_id")
+  roleID    String   @map("roles_id")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user Users @relation("USERS", fields: [userID], references: [id])
+  rol  Roles @relation("ROLES", fields: [roleID], references: [id])
+
+  @@map("user_roles")
+  @@schema("AUTH")
+}
+
+model CustomerProfiles {
+  id             String        @id @default(uuid())
+  user_id        String
+  customerType   TYPE_CUSTOMER @map("customer_type")
+  documentType   DOCUMENT_TYPE @map("document_type")
+  documentNumber String        @map("document_number")
+  companyName    String?       @map("company_name")
+  billingEmail   String?       @map("billing_email")
+  createdAt      DateTime      @map("created_at")
+
+  user              Users               @relation("USERS_CUSTOMER", fields: [user_id], references: [id])
+  customerAddresses CustomerAddresses[] @relation("CUSTOMER_PROFILE")
+  priceQuotes       PriceQuotes[]       @relation("CUSTOMER_PRICE")
+  transportOrders   TransportOrders[]   @relation("CUSTOMER_TRANSPORT")
+  payments          Payments[]          @relation("CUSTOMER_PAYMENTS")
+
+  @@map("customer_profile")
+  @@schema("CUSTOMER")
+}
+
+model CustomerAddresses {
+  id            String   @id @default(uuid())
+  customerId    String   @map("customer_id")
+  label         String
+  addressesLine String   @map("addresses_line")
+  city          String
+  province      String
+  latitude      Decimal
+  longitude     Decimal
+  isDefault     Boolean  @map("is_default")
+  createdAt     DateTime @map("created_at")
+
+  customer CustomerProfiles @relation("CUSTOMER_PROFILE", fields: [customerId], references: [id])
+
+  @@map("customer_addresses")
+  @@schema("CUSTOMER")
+}
+
+model DriverProfiles {
+  id                 String              @id @default(uuid())
+  user_id            String
+  licenseNumber      String              @map("license_number")
+  licenseExpiration  DateTime            @map("license_expiration")
+  availabilityStatus STATUS_DRIVER       @map("availability_status")
+  verificationStatus VERIFICATION_STATUS @map("verification_status")
+  ratingAVG          Decimal             @map("rating_avg")
+  createdAt          DateTime            @default(now()) @map("created_at")
+  updatedAt          DateTime            @updatedAt @map("updated_at")
+
+  user             Users              @relation("DRIVER_USER", fields: [user_id], references: [id])
+  driverDocuments  DriverDocuments[]  @relation("DRIVER_DOCUMENTS")
+  orderAssignments OrderAssignments[] @relation("DRIVER_ORDER")
+  driverLocations  DriverLocations[]  @relation("DRIVER_LOCATIONS")
+  trackingSessions TrackingSessions[] @relation("DRIVER_TRACKING")
+
+  @@index([licenseNumber])
+  @@map("driver_profiles")
+  @@schema("DRIVERS")
+}
+
+model DriverDocuments {
+  id           String              @id @default(uuid())
+  driverId     String              @map("driver_id")
+  documentType String              @map("document_type")
+  fileURL      String              @map("file_url")
+  status       VERIFICATION_STATUS
+  reviewNotes  String              @map("review_notes")
+  uploadedAt   DateTime            @default(now())
+
+  driver DriverProfiles @relation("DRIVER_DOCUMENTS", fields: [driverId], references: [id])
+
+  @@map("driver_documents")
+  @@schema("DRIVERS")
+}
+
+model vehicleCategories {
+  id               String            @id @default(uuid())
+  code             String            @unique
+  name             String
+  description      String
+  maxWeightKg      Decimal           @map("max_weight_kg")
+  maxVolumenM3     Decimal           @map("max_volumen_m3")
+  baseCapacityNote String            @map("base_capacity_note")
+  isActive         Boolean           @map("is_active")
+  vehicles         Vehicles[]        @relation("VEHICLE_CATEGORIES")
+  priceQuotes      PriceQuotes[]     @relation("VEHICLECATEGORY_PRICE")
+  transportOrders  TransportOrders[] @relation("VEHICLECATEGORY_TRANSPORT")
+
+  @@map("vehicle_categories")
+  @@schema("VEHICLES")
 }
 
 model Vehicles {
   id          String         @id @default(uuid())
-  plate       String         @unique
+  driverId    String         @map("driver_id")
+  categoryId  String         @map("category_id")
+  plateNumber String         @unique @map("plate_number")
   brand       String
   model       String
   year        Int
-  type        TYPE_VEHICLE
-  capacity_kg Decimal
-  status      STATUS_DRIVERS
+  color       String
+  status      STATUS_VEHICLE @default(ACTIVE)
+  createdAt   DateTime       @map("created_at")
 
-  createdAt DateTime @default(now())
-  updateAt  DateTime @updatedAt
+  vehicleCategory   vehicleCategories   @relation("VEHICLE_CATEGORIES", fields: [categoryId], references: [id])
+  vehiclesDocuments VehiclesDocuments[] @relation("VEHICLE_DOCUMENTS")
+  orderAssignments  OrderAssignments[]  @relation("VEHICLES_ORDER")
+
+  @@map("vehicles")
+  @@schema("VEHICLES")
+}
+
+model VehiclesDocuments {
+  id             String                   @id @default(uuid())
+  vehicleId      String                   @map("vehicle_id")
+  documentType   DOCUMENT_TYPE_VEHICLE
+  fileUrl        String                   @map("file_url")
+  expirationDate DateTime                 @map("expiration_date")
+  status         VERIFICATION_STATUS_DOCS @default(PENDING)
+  uploadedAt     DateTime                 @default(now())
+
+  vehicleCategory Vehicles @relation("VEHICLE_DOCUMENTS", fields: [vehicleId], references: [id])
+
+  @@map("vehicles_documents")
+  @@schema("VEHICLES")
+}
+
+model rateCards {
+  id          String    @id @default(uuid())
+  name        String
+  description String
+  validForm   DateTime  @map("valid_form")
+  validTo     DateTime? @map("valid_to")
+  isActive    Boolean   @map("is_active")
+  createdAt   DateTime  @default(now())
+
+  rateRules rateRule[] @relation("RATE_CARDS")
+
+  @@map("rate_cards")
+  @@schema("PRICES")
+}
+
+model rateRule {
+  id                    String   @id @default(uuid())
+  rateCardId            String   @map("rate_card_id")
+  vehicleCategoryId     String   @map("vehicule_category_id")
+  baseFare              Decimal  @map("base_fare")
+  pricePerKM            Decimal  @map("price_per_km")
+  pricePerMinute        Decimal  @map("price_per_minute")
+  minimumFare           Decimal  @map("minimum_fare")
+  helper_fee            Decimal  @map("helper_fee")
+  night_fee             Decimal  @map("night_fee")
+  waitingPricePerMinute Decimal  @map("waiting_price_per_minute")
+  cancellationFee       Decimal  @map("cancellation_fee")
+  createdAt             DateTime @map("created_at")
+
+  rateCard rateCards @relation("RATE_CARDS", fields: [rateCardId], references: [id])
+
+  @@map("rate_rule")
+  @@schema("PRICES")
+}
+
+model PriceQuotes {
+  id                   String   @id @default(uuid())
+  customerId           String   @map("customer_id")
+  vehicleCategoryId    String   @map("vehicle_category_id")
+  originAddress        String   @map("origin_address")
+  destinationAddress   String   @map("destination_address")
+  distanceKm           Decimal  @map("distance_km")
+  estimatedDurationMin Int      @map("estimated_duration_min")
+  baseAmount           Decimal  @map("base_amount")
+  extrasAmount         Decimal  @map("extras_amount")
+  demandAmount         Decimal  @map("demand_amount")
+  weatherAmount        Decimal  @map("weather_amount")
+  taxAmount            Decimal  @map("tax_amount")
+  totalAmount          Decimal  @map("total_amount")
+  expiresAt            DateTime @map("expires_at")
+  createdAt            DateTime @default(now()) @map("created_at")
+
+  customer        CustomerProfiles  @relation("CUSTOMER_PRICE", fields: [customerId], references: [id])
+  vehicleCategory vehicleCategories @relation("VEHICLECATEGORY_PRICE", fields: [vehicleCategoryId], references: [id])
+  transportOrders TransportOrders[] @relation("PRICE_TRANSPORT")
+
+  @@map("price_quotes")
+  @@schema("PRICES")
+}
+
+model TransportOrders {
+  id                   String         @id @default(uuid())
+  orderCode            String         @unique @map("order_code")
+  customerId           String         @map("customer_id")
+  quoteId              String         @map("quotes_id")
+  vehicleCategoryId    String         @map("vehicle_category_id")
+  serviceType          SERVICE_TYPE
+  status               STATUS_ORDERS
+  scheduleAt           DateTime?      @map("schedule_at")
+  pickupAt             DateTime?      @map("pickup_at")
+  deliveredAt          DateTime?      @map("delivered_at")
+  distanceKm           Decimal        @map("distance_km")
+  estimatedDurationMin Int            @map("estimated_duration_min")
+  totalAmount          Decimal        @map("total_amout")
+  paymentStatus        PAYMENT_STATUS
+  notes                String
+  createdAt            DateTime       @default(now()) @map("created_at")
+  updateAt             DateTime       @updatedAt @map("update_at")
+
+  customer           CustomerProfiles     @relation("CUSTOMER_TRANSPORT", fields: [customerId], references: [id])
+  quote              PriceQuotes          @relation("PRICE_TRANSPORT", fields: [quoteId], references: [id])
+  vehicleCategory    vehicleCategories    @relation("VEHICLECATEGORY_TRANSPORT", fields: [vehicleCategoryId], references: [id])
+  orderItems         OrderItems[]         @relation("ORDERITEMS_TRANSPORTORDER")
+  orderAssignments   OrderAssignments[]   @relation("ORDERASSIGNMENTS_TRANSPORTORDER")
+  orderStops         OrderStops[]         @relation("ORDERSTOPS_TRANSPORTORDER")
+  orderEvents        OrderEvents[]        @relation("ORDEREVENTS_TRANSPORTORDER")
+  reservations       Reservations[]       @relation("ORDER_RESERVATION")
+  orderCancellations OrderCancellations[] @relation("ORDER_CANCELLATION")
+  driverLocations    DriverLocations[]    @relation("ORDER_DRIVERLOCATIONS")
+  trackingSessions   TrackingSessions[]   @relation("ORDER_TRACKING")
+  deliveryProofs     DeliveryProofs[]     @relation("ORDER_DELIVERY")
+  incidents          Incidents[]          @relation("ORDER_INCIDENTS")
+  payments           Payments[]           @relation("ORDERS_PAYMENTS")
+  refunds            Refunds[]            @relation("REFUNDS_ORDERS")
+
+  @@index([orderCode])
+  @@index([customerId])
+  @@index([quoteId])
+  @@index([vehicleCategoryId])
+  @@map("TransportOrders")
+  @@schema("ORDERS")
+}
+
+model OrderStops {
+  id           String    @id @default(uuid())
+  orderId      String    @map("order_id")
+  stopType     STOP_TYPE
+  sequence     Int
+  contactName  String    @map("contact_name")
+  contactPhone String    @map("contact_phone")
+  addressLine  String    @map("address_line")
+  city         String
+  province     String
+  latitude     Decimal
+  longitude    Decimal
+  instructions String?
+  arrivedAt    DateTime? @map("arrived_at")
+  completedAt  DateTime? @map("completed_at")
+
+  order TransportOrders @relation("ORDERSTOPS_TRANSPORTORDER", fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@index([contactName])
+  @@index([contactPhone])
+  @@index([addressLine])
+  @@map("order_stops")
+  @@schema("ORDERS")
+}
+
+model OrderItems {
+  id            String   @id @default(uuid())
+  orderId       String   @map("order_id")
+  description   String
+  quantity      Int
+  weightKg      Decimal  @map("weight_kg")
+  volumeM3      Decimal? @map("volume_m3")
+  declaredValue Decimal? @map("declared_value")
+  fragile       Boolean
+  requireHelper Boolean  @map("require_helper")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  order TransportOrders @relation("ORDERITEMS_TRANSPORTORDER", fields: [orderId], references: [id])
+
+  @@index([orderId])
+  @@map("order_items")
+  @@schema("ORDERS")
+}
+
+model OrderAssignments {
+  id               String            @id @default(uuid())
+  orderId          String            @map("order_id")
+  driverId         String            @map("driver_id")
+  vehicleId        String            @map("vehicle_id")
+  assignedBy       String?           @map("assigned_by")
+  assignmentStatus ASSIGNMENT_STATUS @map("assignment_status")
+  assignedAt       DateTime          @default(now()) @map("assigned_at")
+  acceptedAt       DateTime?         @map("accepted_at")
+  rejectedAt       DateTime?         @map("rejected_at")
+
+  order   TransportOrders @relation("ORDERASSIGNMENTS_TRANSPORTORDER", fields: [orderId], references: [id])
+  driver  DriverProfiles  @relation("DRIVER_ORDER", fields: [driverId], references: [id])
+  vehicle Vehicles        @relation("VEHICLES_ORDER", fields: [vehicleId], references: [id])
+  user    Users?          @relation("assigned_user", fields: [assignedBy], references: [id])
+
+  @@index([assignedBy])
+  @@index([orderId])
+  @@index([driverId])
+  @@index([vehicleId])
+  @@map("order_assignments")
+  @@schema("ORDERS")
+}
+
+model OrderEvents {
+  id          String     @id @default(uuid())
+  orderId     String     @map("order_id")
+  eventType   EVENT_TYPE @map("event_type")
+  actorUserId String     @map("actor_user_id")
+  description String
+  metadata    Json
+  latitude    Decimal?
+  longitude   Decimal
+  createdAt   DateTime   @default(now()) @map("created_at")
+
+  order TransportOrders @relation("ORDEREVENTS_TRANSPORTORDER", fields: [orderId], references: [id])
+
+  @@map("order_events")
+  @@schema("ORDERS")
+}
+
+model Reservations {
+  id                   String              @id @default(uuid())
+  order_id             String
+  reservedFor          DateTime            @map("reserved_for")
+  reservationStatus    RESERVATIONS_STATUS @map("reservation_status")
+  rescheduleCount      Int                 @map("reschedule_count")
+  cancellationDeadline DateTime            @map("cancellation_deadline")
+  createdAt            DateTime            @map("created_at")
+
+  order TransportOrders @relation("ORDER_RESERVATION", fields: [order_id], references: [id])
+
+  @@map("reservation")
+  @@schema("ORDERS")
+}
+
+model OrderCancellations {
+  id                 String             @id @default(uuid())
+  orderId            String             @map("order_id")
+  cancelledBy        String             @map("cancelled_by")
+  cancellationReason String             @map("cancellation_reason")
+  cancellationType   ORDER_CANCELLATION @map("cancellation_type")
+  feeApplied         Boolean            @map("fee_applied")
+  feeAmount          Decimal            @map("fee_amount")
+  refundAmount       Decimal            @map("refund_amount")
+  cancelledAt        DateTime           @default(now()) @map("cancelled_at")
+
+  order TransportOrders @relation("ORDER_CANCELLATION", fields: [orderId], references: [id])
+
+  @@map("order_cancellations")
+  @@schema("ORDERS")
+}
+
+model DriverLocations {
+  id           String   @id @default(uuid())
+  driverId     String   @map("driver_id")
+  orderId      String   @map("order_id")
+  latitude     Decimal
+  longitude    Decimal
+  accuracy     Decimal?
+  speed        Decimal?
+  batteryLevel Int?     @map("battery_level")
+  recordedAt   DateTime @map("recorded_at")
+  receivedAt   DateTime @map("received_at")
+
+  order  TransportOrders @relation("ORDER_DRIVERLOCATIONS", fields: [orderId], references: [id])
+  driver DriverProfiles  @relation("DRIVER_LOCATIONS", fields: [driverId], references: [id])
+
+  @@map("driver_locations")
+  @@schema("DRIVERS")
+}
+
+model TrackingSessions {
+  id             String            @id @default(uuid())
+  orderId        String            @map("order_id")
+  driverId       String            @map("driver_id")
+  startedAt      DateTime          @map("started_at")
+  endedAt        DateTime?         @map("ended_at")
+  status         TRACKING_SESSIONS
+  lastLocationAt DateTime?         @map("last_location_at")
+
+  order  TransportOrders @relation("ORDER_TRACKING", fields: [orderId], references: [id])
+  driver DriverProfiles  @relation("DRIVER_TRACKING", fields: [driverId], references: [id])
+
+  @@map("tracking_sessions")
+  @@schema("TRACKING")
+}
+
+model DeliveryProofs {
+  id                String     @id @default(uuid())
+  orderId           String     @map("order_id")
+  proof_type        PROOF_TYPE
+  recipientName     String     @map("recipient_name")
+  recipientDocument String     @map("recipient_document")
+  notes             String?
+  latitude          Decimal
+  longitude         Decimal
+  capturedBy        String     @map("captured_by")
+  capturedAt        DateTime   @default(now()) @map("captured_at")
+  validatedAt       DateTime   @map("validate_at")
+  validationStatus  VALIDATION @default(PENDING) @map("validation_status")
+
+  order      TransportOrders @relation("ORDER_DELIVERY", fields: [orderId], references: [id])
+  driver     Users           @relation("USER_DELIVERY", fields: [capturedBy], references: [id])
+  signatures Signatures[]    @relation("SIGNATURE_DELIVERYPROOFS")
+
+  @@index([recipientName])
+  @@map("delivery_proofs")
+  @@schema("EVIDENCES")
+}
+
+model Signatures {
+  id           String   @id @default(uuid())
+  proofId      String   @map("proof_id")
+  signatureUrl String   @map("signature_url")
+  signerName   String   @map("signer_name")
+  signedAt     DateTime @default(now()) @map("signed_at")
+
+  proof DeliveryProofs @relation("SIGNATURE_DELIVERYPROOFS", fields: [proofId], references: [id])
+
+  @@map("signatures")
+  @@schema("EVIDENCES")
+}
+
+model Attachments {
+  id         String   @id @default(uuid())
+  entityType String   @map("entity_type")
+  entityId   String   @map("entity_id")
+  fileName   String   @map("file_name")
+  fileUrl    String   @map("file_url")
+  fileSize   Int      @map("file_size")
+  mimeType   String   @map("mime_type")
+  uploadedBy String   @map("uploaded_by")
+  createdAt  DateTime @map("created_at")
+
+  user Users @relation("Attachments_user", fields: [uploadedBy], references: [id])
+
+  @@index([entityId])
+  @@map("attachments")
+  @@schema("EVIDENCES")
+}
+
+model Incidents {
+  id            String            @id @default(uuid())
+  order_id      String
+  reported_by   String
+  incident_type INCIDENT_TYPE
+  severity      INCIDENT_SEVERITY
+  title         String
+  description   String
+  status        INCIDENT_STATUS
+  latitude      Decimal
+  longitude     Decimal
+  reported_at   DateTime          @default(now())
+  resolved_at   DateTime?
+
+  order             TransportOrders     @relation("ORDER_INCIDENTS", fields: [order_id], references: [id])
+  user              Users               @relation("USER_REPORTED", fields: [reported_by], references: [id])
+  incidentsComments IncidentsComments[] @relation("INCIDENTS_COMMENTS")
+
+  @@index([order_id])
+  @@index([reported_by])
+  @@index([title])
+  @@map("incidents")
+  @@schema("INCIDENTS")
+}
+
+model IncidentsComments {
+  id         String   @id @default(uuid())
+  incidentId String   @map("incident_id")
+  userId     String   @map("user_id")
+  comment    String
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  user     Users     @relation("USER_INCIDENTS_COMMENTS", fields: [userId], references: [id])
+  incident Incidents @relation("INCIDENTS_COMMENTS", fields: [incidentId], references: [id])
+
+  @@index([userId])
+  @@map("incidents_comments")
+  @@schema("INCIDENTS")
+}
+
+model Payments {
+  id                String         @id @default(uuid())
+  orderId           String         @map("order_id")
+  customerId        String         @map("customer_id")
+  amount            Decimal
+  currency          String
+  paymentMethod     PAYMENT_METHOD @map("payment_method")
+  paymentProvider   String?        @map("payment_provider")
+  status            PAYMENT_STATUS
+  providerReference String?
+  paidAt            DateTime       @default(now()) @map("paid_at")
+  createdAt         DateTime       @default(now()) @map("created_at")
+
+  order                TransportOrders        @relation("ORDERS_PAYMENTS", fields: [orderId], references: [id])
+  customer             CustomerProfiles       @relation("CUSTOMER_PAYMENTS", fields: [customerId], references: [id])
+  paymentsTransactions PaymentsTransactions[] @relation("PAYMENTS_TRANSACTIONS")
+  refunds              Refunds[]              @relation("PAYMENT_REFUNDS")
+
+  @@map("payments")
+  @@schema("PAIDS")
+}
+
+model PaymentsTransactions {
+  id               String                       @id @default(uuid())
+  paymentId        String                       @map("payment_id")
+  transactionType  PAYMENT_TRANSACTIONS_TYPE    @map("transaction_type")
+  amount           Decimal
+  status           PAYMENTS_TRANSACTIONS_STATUS
+  providerResponse Json                         @map("provider_response")
+  createdAt        DateTime                     @default(now()) @map("created_at")
+
+  payment Payments @relation("PAYMENTS_TRANSACTIONS", fields: [paymentId], references: [id])
+
+  @@map("payments_transactions")
+  @@schema("PAIDS")
+}
+
+model Refunds {
+  id                String                 @id @default(uuid()) // IDENTIFICADOR
+  paymentId         String                 @map("payment_id") // PAGO
+  orderId           String                 @map("order_id") // ORDEN
+  amount            Decimal
+  reason            String // RAZON 
+  status            PAYMENTS_REFUND_STATUS // ESTADOS DE LA DEVOLUCION
+  providerReference String?                @map("provider_response") // REFERENCIA EXTERNA
+  createdAt         DateTime               @map("created_at") // FECHA 
+
+  order   TransportOrders @relation("REFUNDS_ORDERS", fields: [orderId], references: [id])
+  payment Payments        @relation("PAYMENT_REFUNDS", fields: [paymentId], references: [id])
+
+  @@index([orderId])
+  @@index([paymentId])
+  @@map("refunds")
+  @@schema("PAIDS")
+}
+
+model NOTIFICATIONS {
+  id               String            @id @default(uuid()) // IDENTIFICADOR
+  userId           String            @map("user_id") // USUARIO DESTINO 
+  title            String // TITULO 
+  message          String // MENSAJE
+  notificationType NOTIFICATION_TYPE @map("notification_type") // TIPO DE NOTIFICACION: ORDER_UPDATE, PAYMENT, INCIDENT, PROMOTION, SYSTEM
+  data             Json // METADATA
+  readAt           DateTime?         @map("read_at") // FECHA DE LECTURA
+  createdAt        DateTime          @default(now()) @map("created_at") // FECHA
+
+  user Users @relation("NOTIFICATIONS_USERS", fields: [userId], references: [id])
+
+  @@index([userId])
+  @@index([title])
+  @@map("notifications")
+  @@schema("NOTIFICATIONS")
+}
+
+model SYSTEM_PARAMETERS {
+  id          String       @id @default(uuid()) // IDENTIFICADOR
+  key         String       @unique // Nombre del parametro
+  value       String // Valor
+  valueType   SYSTEM_VALUE @map("value_type") // STRING, NUMBER, BOOLEAN, JSON
+  description String // Descripcion 
+  updatedBy   String       @map("updated_by") // Usuario
+  updatedAt   DateTime     @updatedAt // Fecha 
+
+  user Users @relation("UPDATED_USER", fields: [updatedBy], references: [id])
+
+  @@index([key])
+  @@map("system_parameters")
+  @@schema("ADMINISTRATION")
+}
+
+model CATALOGS {
+  id        String  @id @default(uuid()) // Identificador
+  groupKey  String  @map("group_key") // Grupo 
+  code      String // Codigo 
+  label     String // Etiqueta visible
+  sortOrder Int     @map("sort_order") // Orden 
+  isActive  Boolean @map("is_active") // Estado 
+
+  @@index([code])
+  @@map("catalogs")
+  @@schema("ADMINISTRATION")
+}
+
+model AuditLogs {
+  id          String   @id @default(uuid()) // Identificador
+  actorUserId String?  @map("actor_user_id") // Usuario que ejecuto
+  action      String // Accion realizada
+  entityType  String   @map("entity_type") // Tabla o modulo afectado
+  entityId    String   @map("entity_id") // ID Afectado 
+  oldValues   Json?    @map("old_values") // Valores anteriores
+  newValues   Json?    @map("new_values") // Valores nuevos
+  ipAddress   String?  @map("ip_address") // IP
+  userAgent   String?  @map("user_agent") // Navegador/Dispositivo
+  createdAt   DateTime @map("created_at") // Fecha 
+
+  user Users? @relation("AUDIT_USERS", fields: [actorUserId], references: [id])
+
+  @@index([entityId])
+  @@index([ipAddress])
+  @@map("audit_logs")
+  @@schema("AUDIT")
+}
+
+model WEBHOOKEVENTS {
+  id              String   @id @default(uuid()) // Identificador
+  eventType       String   @map("event_type") // Tipo de evento 
+  externalEventId String   @map("external_event_id") // ID Externo 
+  payload         Json // Payload Recibido
+  processed       Boolean // Si fue procesado
+  processedAt     DateTime @map("processed_at") // Fecha de procesamiento
+  createdAt       DateTime @map("created_at") // Fecha de recepcion 
+
+  @@map("webhook_events")
+  @@schema("INTEGRATIONS")
+}
+
+model EXTERNALAPIOGS {
+  id              String   @id @default(uuid()) // Identificador
+  provider        String // Google Maps, FCM, Payment Gateway, etc
+  endpoint        String // Endpoint Usado
+  requestPayload  Json?    @map("request_payload") // Solicitud
+  responsePayload Json?    @map("response_payload") // Respuesta 
+  statusCode      Int?     @map("status_code") // Codigo HTTP
+  success         Boolean // Resultado 
+  createdAt       DateTime @map("created_at") // Fecha
+
+  @@index([requestPayload])
+  @@index([responsePayload])
+  @@map("external_api_logs")
+  @@schema("INTEGRATIONS")
 }
