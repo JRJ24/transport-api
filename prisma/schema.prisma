@@ -1,8 +1,6 @@
 // This is your Prisma schema file,
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
-// Get a free hosted Postgres database in seconds: `npx create-db`
-
 generator client {
   provider = "prisma-client"
   output   = "../generated/prisma"
@@ -290,28 +288,29 @@ enum SYSTEM_VALUE {
   @@schema("ADMINISTRATION")
 }
 
-model Users {
+model User {
   id           String         @id @default(uuid())
   fullName     String         @map("full_name")
   email        String         @unique
   phone        String         @unique
   passwordHash String         @map("password_hash")
   status       STATUS_ACCOUNT @default(ACTIVE)
-  lastLoginAt  DateTime       @map("last_login_at")
+  lastLoginAt  DateTime?      @map("last_login_at")
   createdAt    DateTime       @default(now()) @map("created_at")
-  updateAt     DateTime       @updatedAt @map("update_at")
+  updatedAt    DateTime       @updatedAt @map("update_at")
 
-  userRoles         UserRoles[]         @relation("USERS")
-  customerProfiles  CustomerProfiles[]  @relation("USERS_CUSTOMER")
-  driverProfiles    DriverProfiles[]    @relation("DRIVER_USER")
-  orderAssignments  OrderAssignments[]  @relation("assigned_user")
-  deliveryProofs    DeliveryProofs[]    @relation("USER_DELIVERY")
-  attachments       Attachments[]       @relation("Attachments_user")
-  incidents         Incidents[]         @relation("USER_REPORTED")
-  incidentsComments IncidentsComments[] @relation("USER_INCIDENTS_COMMENTS")
-  notifications     NOTIFICATIONS[]     @relation("NOTIFICATIONS_USERS")
-  auditLogs         AuditLogs[]         @relation("AUDIT_USERS")
-  systemParameters  SYSTEM_PARAMETERS[] @relation("UPDATED_USER")
+  userRoles         UserRole[]        @relation("USERS")
+  sessions          UserSession[]     @relation("USER_SESSIONS")
+  customerProfiles  CustomerProfile[] @relation("USERS_CUSTOMER")
+  driverProfiles    DriverProfile[]   @relation("DRIVER_USER")
+  orderAssignments  OrderAssignment[] @relation("assigned_user")
+  deliveryProofs    DeliveryProof[]   @relation("USER_DELIVERY")
+  attachments       Attachment[]      @relation("Attachments_user")
+  incidents         Incident[]        @relation("USER_REPORTED")
+  incidentsComments IncidentComment[] @relation("USER_INCIDENTS_COMMENTS")
+  notifications     Notification[]    @relation("NOTIFICATIONS_USERS")
+  auditLogs         AuditLog[]        @relation("AUDIT_USERS")
+  systemParameters  SystemParameter[] @relation("UPDATED_USER")
 
   @@index([email])
   @@index([phone])
@@ -319,33 +318,58 @@ model Users {
   @@schema("AUTH")
 }
 
-model Roles {
-  id          String      @id @default(uuid())
-  code        ROLES       @unique
+model Role {
+  id          String     @id @default(uuid())
+  code        ROLES      @unique
   name        String
   description String
-  userRoles   UserRoles[] @relation("ROLES")
+  userRoles   UserRole[] @relation("ROLES")
 
   @@map("roles")
   @@schema("AUTH")
 }
 
-model UserRoles {
+model UserRole {
   id        String   @id @default(uuid())
   userID    String   @map("user_id")
   roleID    String   @map("roles_id")
   createdAt DateTime @default(now()) @map("created_at")
 
-  user Users @relation("USERS", fields: [userID], references: [id])
-  rol  Roles @relation("ROLES", fields: [roleID], references: [id])
+  user User @relation("USERS", fields: [userID], references: [id])
+  rol  Role @relation("ROLES", fields: [roleID], references: [id])
 
   @@map("user_roles")
   @@schema("AUTH")
 }
 
-model CustomerProfiles {
+model UserSession {
+  id               String    @id @default(uuid())
+  userId           String    @map("user_id")
+  refreshTokenHash String    @map("refresh_token_hash")
+  deviceId         String?   @map("device_id")
+  deviceName       String?   @map("device_name")
+  platform         String?
+  ipAddress        String?   @map("ip_address")
+  userAgent        String?   @map("user_agent")
+  lastActivityAt   DateTime  @default(now()) @map("last_activity_at")
+  expiresAt        DateTime  @map("expires_at")
+  revokedAt        DateTime? @map("revoked_at")
+  createdAt        DateTime  @default(now()) @map("created_at")
+  updatedAt        DateTime  @updatedAt @map("updated_at")
+
+  user User @relation("USER_SESSIONS", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+  @@index([revokedAt])
+  @@index([deviceId])
+  @@map("user_sessions")
+  @@schema("AUTH")
+}
+
+model CustomerProfile {
   id             String        @id @default(uuid())
-  user_id        String
+  userId         String        @map("user_id")
   customerType   TYPE_CUSTOMER @map("customer_type")
   documentType   DOCUMENT_TYPE @map("document_type")
   documentNumber String        @map("document_number")
@@ -353,17 +377,17 @@ model CustomerProfiles {
   billingEmail   String?       @map("billing_email")
   createdAt      DateTime      @map("created_at")
 
-  user              Users               @relation("USERS_CUSTOMER", fields: [user_id], references: [id])
-  customerAddresses CustomerAddresses[] @relation("CUSTOMER_PROFILE")
-  priceQuotes       PriceQuotes[]       @relation("CUSTOMER_PRICE")
-  transportOrders   TransportOrders[]   @relation("CUSTOMER_TRANSPORT")
-  payments          Payments[]          @relation("CUSTOMER_PAYMENTS")
+  user              User              @relation("USERS_CUSTOMER", fields: [userId], references: [id])
+  customerAddresses CustomerAddress[] @relation("CUSTOMER_PROFILE")
+  priceQuotes       PriceQuote[]      @relation("CUSTOMER_PRICE")
+  transportOrders   TransportOrder[]  @relation("CUSTOMER_TRANSPORT")
+  payments          Payment[]         @relation("CUSTOMER_PAYMENTS")
 
   @@map("customer_profile")
   @@schema("CUSTOMER")
 }
 
-model CustomerAddresses {
+model CustomerAddress {
   id            String   @id @default(uuid())
   customerId    String   @map("customer_id")
   label         String
@@ -375,15 +399,15 @@ model CustomerAddresses {
   isDefault     Boolean  @map("is_default")
   createdAt     DateTime @map("created_at")
 
-  customer CustomerProfiles @relation("CUSTOMER_PROFILE", fields: [customerId], references: [id])
+  customer CustomerProfile @relation("CUSTOMER_PROFILE", fields: [customerId], references: [id])
 
   @@map("customer_addresses")
   @@schema("CUSTOMER")
 }
 
-model DriverProfiles {
+model DriverProfile {
   id                 String              @id @default(uuid())
-  user_id            String
+  userId             String              @map("user_id")
   licenseNumber      String              @map("license_number")
   licenseExpiration  DateTime            @map("license_expiration")
   availabilityStatus STATUS_DRIVER       @map("availability_status")
@@ -392,18 +416,18 @@ model DriverProfiles {
   createdAt          DateTime            @default(now()) @map("created_at")
   updatedAt          DateTime            @updatedAt @map("updated_at")
 
-  user             Users              @relation("DRIVER_USER", fields: [user_id], references: [id])
-  driverDocuments  DriverDocuments[]  @relation("DRIVER_DOCUMENTS")
-  orderAssignments OrderAssignments[] @relation("DRIVER_ORDER")
-  driverLocations  DriverLocations[]  @relation("DRIVER_LOCATIONS")
-  trackingSessions TrackingSessions[] @relation("DRIVER_TRACKING")
+  user             User              @relation("DRIVER_USER", fields: [userId], references: [id])
+  driverDocuments  DriverDocument[]  @relation("DRIVER_DOCUMENTS")
+  orderAssignments OrderAssignment[] @relation("DRIVER_ORDER")
+  driverLocations  DriverLocation[]  @relation("DRIVER_LOCATIONS")
+  trackingSessions TrackingSession[] @relation("DRIVER_TRACKING")
 
   @@index([licenseNumber])
   @@map("driver_profiles")
   @@schema("DRIVERS")
 }
 
-model DriverDocuments {
+model DriverDocument {
   id           String              @id @default(uuid())
   driverId     String              @map("driver_id")
   documentType String              @map("document_type")
@@ -412,30 +436,30 @@ model DriverDocuments {
   reviewNotes  String              @map("review_notes")
   uploadedAt   DateTime            @default(now())
 
-  driver DriverProfiles @relation("DRIVER_DOCUMENTS", fields: [driverId], references: [id])
+  driver DriverProfile @relation("DRIVER_DOCUMENTS", fields: [driverId], references: [id])
 
   @@map("driver_documents")
   @@schema("DRIVERS")
 }
 
-model vehicleCategories {
-  id               String            @id @default(uuid())
-  code             String            @unique
+model VehicleCategory {
+  id               String           @id @default(uuid())
+  code             String           @unique
   name             String
   description      String
-  maxWeightKg      Decimal           @map("max_weight_kg")
-  maxVolumenM3     Decimal           @map("max_volumen_m3")
-  baseCapacityNote String            @map("base_capacity_note")
-  isActive         Boolean           @map("is_active")
-  vehicles         Vehicles[]        @relation("VEHICLE_CATEGORIES")
-  priceQuotes      PriceQuotes[]     @relation("VEHICLECATEGORY_PRICE")
-  transportOrders  TransportOrders[] @relation("VEHICLECATEGORY_TRANSPORT")
+  maxWeightKg      Decimal          @map("max_weight_kg")
+  maxVolumenM3     Decimal          @map("max_volumen_m3")
+  baseCapacityNote String           @map("base_capacity_note")
+  isActive         Boolean          @map("is_active")
+  vehicles         Vehicle[]        @relation("VEHICLE_CATEGORIES")
+  priceQuotes      PriceQuote[]     @relation("VEHICLECATEGORY_PRICE")
+  transportOrders  TransportOrder[] @relation("VEHICLECATEGORY_TRANSPORT")
 
   @@map("vehicle_categories")
   @@schema("VEHICLES")
 }
 
-model Vehicles {
+model Vehicle {
   id          String         @id @default(uuid())
   driverId    String         @map("driver_id")
   categoryId  String         @map("category_id")
@@ -447,15 +471,15 @@ model Vehicles {
   status      STATUS_VEHICLE @default(ACTIVE)
   createdAt   DateTime       @map("created_at")
 
-  vehicleCategory   vehicleCategories   @relation("VEHICLE_CATEGORIES", fields: [categoryId], references: [id])
-  vehiclesDocuments VehiclesDocuments[] @relation("VEHICLE_DOCUMENTS")
-  orderAssignments  OrderAssignments[]  @relation("VEHICLES_ORDER")
+  vehicleCategory   VehicleCategory   @relation("VEHICLE_CATEGORIES", fields: [categoryId], references: [id])
+  vehiclesDocuments VehicleDocument[] @relation("VEHICLE_DOCUMENTS")
+  orderAssignments  OrderAssignment[] @relation("VEHICLES_ORDER")
 
   @@map("vehicles")
   @@schema("VEHICLES")
 }
 
-model VehiclesDocuments {
+model VehicleDocument {
   id             String                   @id @default(uuid())
   vehicleId      String                   @map("vehicle_id")
   documentType   DOCUMENT_TYPE_VEHICLE
@@ -464,13 +488,13 @@ model VehiclesDocuments {
   status         VERIFICATION_STATUS_DOCS @default(PENDING)
   uploadedAt     DateTime                 @default(now())
 
-  vehicleCategory Vehicles @relation("VEHICLE_DOCUMENTS", fields: [vehicleId], references: [id])
+  vehicleCategory Vehicle @relation("VEHICLE_DOCUMENTS", fields: [vehicleId], references: [id])
 
   @@map("vehicles_documents")
   @@schema("VEHICLES")
 }
 
-model rateCards {
+model RateCard {
   id          String    @id @default(uuid())
   name        String
   description String
@@ -479,13 +503,13 @@ model rateCards {
   isActive    Boolean   @map("is_active")
   createdAt   DateTime  @default(now())
 
-  rateRules rateRule[] @relation("RATE_CARDS")
+  rateRules RateRule[] @relation("RATE_CARDS")
 
   @@map("rate_cards")
   @@schema("PRICES")
 }
 
-model rateRule {
+model RateRule {
   id                    String   @id @default(uuid())
   rateCardId            String   @map("rate_card_id")
   vehicleCategoryId     String   @map("vehicule_category_id")
@@ -493,19 +517,19 @@ model rateRule {
   pricePerKM            Decimal  @map("price_per_km")
   pricePerMinute        Decimal  @map("price_per_minute")
   minimumFare           Decimal  @map("minimum_fare")
-  helper_fee            Decimal  @map("helper_fee")
-  night_fee             Decimal  @map("night_fee")
+  helperFee             Decimal  @map("helper_fee")
+  nightFee              Decimal  @map("night_fee")
   waitingPricePerMinute Decimal  @map("waiting_price_per_minute")
   cancellationFee       Decimal  @map("cancellation_fee")
   createdAt             DateTime @map("created_at")
 
-  rateCard rateCards @relation("RATE_CARDS", fields: [rateCardId], references: [id])
+  rateCard RateCard @relation("RATE_CARDS", fields: [rateCardId], references: [id])
 
   @@map("rate_rule")
   @@schema("PRICES")
 }
 
-model PriceQuotes {
+model PriceQuote {
   id                   String   @id @default(uuid())
   customerId           String   @map("customer_id")
   vehicleCategoryId    String   @map("vehicle_category_id")
@@ -522,15 +546,15 @@ model PriceQuotes {
   expiresAt            DateTime @map("expires_at")
   createdAt            DateTime @default(now()) @map("created_at")
 
-  customer        CustomerProfiles  @relation("CUSTOMER_PRICE", fields: [customerId], references: [id])
-  vehicleCategory vehicleCategories @relation("VEHICLECATEGORY_PRICE", fields: [vehicleCategoryId], references: [id])
-  transportOrders TransportOrders[] @relation("PRICE_TRANSPORT")
+  customer        CustomerProfile  @relation("CUSTOMER_PRICE", fields: [customerId], references: [id])
+  vehicleCategory VehicleCategory  @relation("VEHICLECATEGORY_PRICE", fields: [vehicleCategoryId], references: [id])
+  transportOrders TransportOrder[] @relation("PRICE_TRANSPORT")
 
   @@map("price_quotes")
   @@schema("PRICES")
 }
 
-model TransportOrders {
+model TransportOrder {
   id                   String         @id @default(uuid())
   orderCode            String         @unique @map("order_code")
   customerId           String         @map("customer_id")
@@ -547,23 +571,23 @@ model TransportOrders {
   paymentStatus        PAYMENT_STATUS
   notes                String
   createdAt            DateTime       @default(now()) @map("created_at")
-  updateAt             DateTime       @updatedAt @map("update_at")
+  updatedAt            DateTime       @updatedAt @map("update_at")
 
-  customer           CustomerProfiles     @relation("CUSTOMER_TRANSPORT", fields: [customerId], references: [id])
-  quote              PriceQuotes          @relation("PRICE_TRANSPORT", fields: [quoteId], references: [id])
-  vehicleCategory    vehicleCategories    @relation("VEHICLECATEGORY_TRANSPORT", fields: [vehicleCategoryId], references: [id])
-  orderItems         OrderItems[]         @relation("ORDERITEMS_TRANSPORTORDER")
-  orderAssignments   OrderAssignments[]   @relation("ORDERASSIGNMENTS_TRANSPORTORDER")
-  orderStops         OrderStops[]         @relation("ORDERSTOPS_TRANSPORTORDER")
-  orderEvents        OrderEvents[]        @relation("ORDEREVENTS_TRANSPORTORDER")
-  reservations       Reservations[]       @relation("ORDER_RESERVATION")
-  orderCancellations OrderCancellations[] @relation("ORDER_CANCELLATION")
-  driverLocations    DriverLocations[]    @relation("ORDER_DRIVERLOCATIONS")
-  trackingSessions   TrackingSessions[]   @relation("ORDER_TRACKING")
-  deliveryProofs     DeliveryProofs[]     @relation("ORDER_DELIVERY")
-  incidents          Incidents[]          @relation("ORDER_INCIDENTS")
-  payments           Payments[]           @relation("ORDERS_PAYMENTS")
-  refunds            Refunds[]            @relation("REFUNDS_ORDERS")
+  customer           CustomerProfile     @relation("CUSTOMER_TRANSPORT", fields: [customerId], references: [id])
+  quote              PriceQuote          @relation("PRICE_TRANSPORT", fields: [quoteId], references: [id])
+  vehicleCategory    VehicleCategory     @relation("VEHICLECATEGORY_TRANSPORT", fields: [vehicleCategoryId], references: [id])
+  orderItems         OrderItem[]         @relation("ORDERITEMS_TRANSPORTORDER")
+  orderAssignments   OrderAssignment[]   @relation("ORDERASSIGNMENTS_TRANSPORTORDER")
+  orderStops         OrderStop[]         @relation("ORDERSTOPS_TRANSPORTORDER")
+  orderEvents        OrderEvent[]        @relation("ORDEREVENTS_TRANSPORTORDER")
+  reservations       Reservation[]       @relation("ORDER_RESERVATION")
+  orderCancellations OrderCancellation[] @relation("ORDER_CANCELLATION")
+  driverLocations    DriverLocation[]    @relation("ORDER_DRIVERLOCATIONS")
+  trackingSessions   TrackingSession[]   @relation("ORDER_TRACKING")
+  deliveryProofs     DeliveryProof[]     @relation("ORDER_DELIVERY")
+  incidents          Incident[]          @relation("ORDER_INCIDENTS")
+  payments           Payment[]           @relation("ORDERS_PAYMENTS")
+  refunds            Refund[]            @relation("REFUNDS_ORDERS")
 
   @@index([orderCode])
   @@index([customerId])
@@ -573,7 +597,7 @@ model TransportOrders {
   @@schema("ORDERS")
 }
 
-model OrderStops {
+model OrderStop {
   id           String    @id @default(uuid())
   orderId      String    @map("order_id")
   stopType     STOP_TYPE
@@ -589,7 +613,7 @@ model OrderStops {
   arrivedAt    DateTime? @map("arrived_at")
   completedAt  DateTime? @map("completed_at")
 
-  order TransportOrders @relation("ORDERSTOPS_TRANSPORTORDER", fields: [orderId], references: [id])
+  order TransportOrder @relation("ORDERSTOPS_TRANSPORTORDER", fields: [orderId], references: [id])
 
   @@index([orderId])
   @@index([contactName])
@@ -599,7 +623,7 @@ model OrderStops {
   @@schema("ORDERS")
 }
 
-model OrderItems {
+model OrderItem {
   id            String   @id @default(uuid())
   orderId       String   @map("order_id")
   description   String
@@ -611,14 +635,14 @@ model OrderItems {
   requireHelper Boolean  @map("require_helper")
   createdAt     DateTime @default(now()) @map("created_at")
 
-  order TransportOrders @relation("ORDERITEMS_TRANSPORTORDER", fields: [orderId], references: [id])
+  order TransportOrder @relation("ORDERITEMS_TRANSPORTORDER", fields: [orderId], references: [id])
 
   @@index([orderId])
   @@map("order_items")
   @@schema("ORDERS")
 }
 
-model OrderAssignments {
+model OrderAssignment {
   id               String            @id @default(uuid())
   orderId          String            @map("order_id")
   driverId         String            @map("driver_id")
@@ -629,10 +653,10 @@ model OrderAssignments {
   acceptedAt       DateTime?         @map("accepted_at")
   rejectedAt       DateTime?         @map("rejected_at")
 
-  order   TransportOrders @relation("ORDERASSIGNMENTS_TRANSPORTORDER", fields: [orderId], references: [id])
-  driver  DriverProfiles  @relation("DRIVER_ORDER", fields: [driverId], references: [id])
-  vehicle Vehicles        @relation("VEHICLES_ORDER", fields: [vehicleId], references: [id])
-  user    Users?          @relation("assigned_user", fields: [assignedBy], references: [id])
+  order   TransportOrder @relation("ORDERASSIGNMENTS_TRANSPORTORDER", fields: [orderId], references: [id])
+  driver  DriverProfile  @relation("DRIVER_ORDER", fields: [driverId], references: [id])
+  vehicle Vehicle        @relation("VEHICLES_ORDER", fields: [vehicleId], references: [id])
+  user    User?          @relation("assigned_user", fields: [assignedBy], references: [id])
 
   @@index([assignedBy])
   @@index([orderId])
@@ -642,7 +666,7 @@ model OrderAssignments {
   @@schema("ORDERS")
 }
 
-model OrderEvents {
+model OrderEvent {
   id          String     @id @default(uuid())
   orderId     String     @map("order_id")
   eventType   EVENT_TYPE @map("event_type")
@@ -653,28 +677,28 @@ model OrderEvents {
   longitude   Decimal
   createdAt   DateTime   @default(now()) @map("created_at")
 
-  order TransportOrders @relation("ORDEREVENTS_TRANSPORTORDER", fields: [orderId], references: [id])
+  order TransportOrder @relation("ORDEREVENTS_TRANSPORTORDER", fields: [orderId], references: [id])
 
   @@map("order_events")
   @@schema("ORDERS")
 }
 
-model Reservations {
+model Reservation {
   id                   String              @id @default(uuid())
-  order_id             String
+  orderId              String              @map("order_id")
   reservedFor          DateTime            @map("reserved_for")
   reservationStatus    RESERVATIONS_STATUS @map("reservation_status")
   rescheduleCount      Int                 @map("reschedule_count")
   cancellationDeadline DateTime            @map("cancellation_deadline")
   createdAt            DateTime            @map("created_at")
 
-  order TransportOrders @relation("ORDER_RESERVATION", fields: [order_id], references: [id])
+  order TransportOrder @relation("ORDER_RESERVATION", fields: [orderId], references: [id])
 
   @@map("reservation")
   @@schema("ORDERS")
 }
 
-model OrderCancellations {
+model OrderCancellation {
   id                 String             @id @default(uuid())
   orderId            String             @map("order_id")
   cancelledBy        String             @map("cancelled_by")
@@ -685,13 +709,13 @@ model OrderCancellations {
   refundAmount       Decimal            @map("refund_amount")
   cancelledAt        DateTime           @default(now()) @map("cancelled_at")
 
-  order TransportOrders @relation("ORDER_CANCELLATION", fields: [orderId], references: [id])
+  order TransportOrder @relation("ORDER_CANCELLATION", fields: [orderId], references: [id])
 
   @@map("order_cancellations")
   @@schema("ORDERS")
 }
 
-model DriverLocations {
+model DriverLocation {
   id           String   @id @default(uuid())
   driverId     String   @map("driver_id")
   orderId      String   @map("order_id")
@@ -703,14 +727,14 @@ model DriverLocations {
   recordedAt   DateTime @map("recorded_at")
   receivedAt   DateTime @map("received_at")
 
-  order  TransportOrders @relation("ORDER_DRIVERLOCATIONS", fields: [orderId], references: [id])
-  driver DriverProfiles  @relation("DRIVER_LOCATIONS", fields: [driverId], references: [id])
+  order  TransportOrder @relation("ORDER_DRIVERLOCATIONS", fields: [orderId], references: [id])
+  driver DriverProfile  @relation("DRIVER_LOCATIONS", fields: [driverId], references: [id])
 
   @@map("driver_locations")
   @@schema("DRIVERS")
 }
 
-model TrackingSessions {
+model TrackingSession {
   id             String            @id @default(uuid())
   orderId        String            @map("order_id")
   driverId       String            @map("driver_id")
@@ -719,17 +743,17 @@ model TrackingSessions {
   status         TRACKING_SESSIONS
   lastLocationAt DateTime?         @map("last_location_at")
 
-  order  TransportOrders @relation("ORDER_TRACKING", fields: [orderId], references: [id])
-  driver DriverProfiles  @relation("DRIVER_TRACKING", fields: [driverId], references: [id])
+  order  TransportOrder @relation("ORDER_TRACKING", fields: [orderId], references: [id])
+  driver DriverProfile  @relation("DRIVER_TRACKING", fields: [driverId], references: [id])
 
   @@map("tracking_sessions")
   @@schema("TRACKING")
 }
 
-model DeliveryProofs {
+model DeliveryProof {
   id                String     @id @default(uuid())
   orderId           String     @map("order_id")
-  proof_type        PROOF_TYPE
+  proofType         PROOF_TYPE @map("proof_type")
   recipientName     String     @map("recipient_name")
   recipientDocument String     @map("recipient_document")
   notes             String?
@@ -740,29 +764,29 @@ model DeliveryProofs {
   validatedAt       DateTime   @map("validate_at")
   validationStatus  VALIDATION @default(PENDING) @map("validation_status")
 
-  order      TransportOrders @relation("ORDER_DELIVERY", fields: [orderId], references: [id])
-  driver     Users           @relation("USER_DELIVERY", fields: [capturedBy], references: [id])
-  signatures Signatures[]    @relation("SIGNATURE_DELIVERYPROOFS")
+  order      TransportOrder @relation("ORDER_DELIVERY", fields: [orderId], references: [id])
+  driver     User           @relation("USER_DELIVERY", fields: [capturedBy], references: [id])
+  signatures Signature[]    @relation("SIGNATURE_DELIVERYPROOFS")
 
   @@index([recipientName])
   @@map("delivery_proofs")
   @@schema("EVIDENCES")
 }
 
-model Signatures {
+model Signature {
   id           String   @id @default(uuid())
   proofId      String   @map("proof_id")
   signatureUrl String   @map("signature_url")
   signerName   String   @map("signer_name")
   signedAt     DateTime @default(now()) @map("signed_at")
 
-  proof DeliveryProofs @relation("SIGNATURE_DELIVERYPROOFS", fields: [proofId], references: [id])
+  proof DeliveryProof @relation("SIGNATURE_DELIVERYPROOFS", fields: [proofId], references: [id])
 
   @@map("signatures")
   @@schema("EVIDENCES")
 }
 
-model Attachments {
+model Attachment {
   id         String   @id @default(uuid())
   entityType String   @map("entity_type")
   entityId   String   @map("entity_id")
@@ -773,54 +797,54 @@ model Attachments {
   uploadedBy String   @map("uploaded_by")
   createdAt  DateTime @map("created_at")
 
-  user Users @relation("Attachments_user", fields: [uploadedBy], references: [id])
+  user User @relation("Attachments_user", fields: [uploadedBy], references: [id])
 
   @@index([entityId])
   @@map("attachments")
   @@schema("EVIDENCES")
 }
 
-model Incidents {
-  id            String            @id @default(uuid())
-  order_id      String
-  reported_by   String
-  incident_type INCIDENT_TYPE
-  severity      INCIDENT_SEVERITY
-  title         String
-  description   String
-  status        INCIDENT_STATUS
-  latitude      Decimal
-  longitude     Decimal
-  reported_at   DateTime          @default(now())
-  resolved_at   DateTime?
+model Incident {
+  id           String            @id @default(uuid())
+  orderId      String            @map("order_id")
+  reportedBy   String            @map("reported_by")
+  incidentType INCIDENT_TYPE     @map("incident_type")
+  severity     INCIDENT_SEVERITY
+  title        String
+  description  String
+  status       INCIDENT_STATUS
+  latitude     Decimal
+  longitude    Decimal
+  reportedAt   DateTime          @default(now()) @map("reported_at")
+  resolvedAt   DateTime?         @map("resolved_at")
 
-  order             TransportOrders     @relation("ORDER_INCIDENTS", fields: [order_id], references: [id])
-  user              Users               @relation("USER_REPORTED", fields: [reported_by], references: [id])
-  incidentsComments IncidentsComments[] @relation("INCIDENTS_COMMENTS")
+  order             TransportOrder    @relation("ORDER_INCIDENTS", fields: [orderId], references: [id])
+  user              User              @relation("USER_REPORTED", fields: [reportedBy], references: [id])
+  incidentsComments IncidentComment[] @relation("INCIDENTS_COMMENTS")
 
-  @@index([order_id])
-  @@index([reported_by])
+  @@index([orderId])
+  @@index([reportedBy])
   @@index([title])
   @@map("incidents")
   @@schema("INCIDENTS")
 }
 
-model IncidentsComments {
+model IncidentComment {
   id         String   @id @default(uuid())
   incidentId String   @map("incident_id")
   userId     String   @map("user_id")
   comment    String
   createdAt  DateTime @default(now()) @map("created_at")
 
-  user     Users     @relation("USER_INCIDENTS_COMMENTS", fields: [userId], references: [id])
-  incident Incidents @relation("INCIDENTS_COMMENTS", fields: [incidentId], references: [id])
+  user     User     @relation("USER_INCIDENTS_COMMENTS", fields: [userId], references: [id])
+  incident Incident @relation("INCIDENTS_COMMENTS", fields: [incidentId], references: [id])
 
   @@index([userId])
   @@map("incidents_comments")
   @@schema("INCIDENTS")
 }
 
-model Payments {
+model Payment {
   id                String         @id @default(uuid())
   orderId           String         @map("order_id")
   customerId        String         @map("customer_id")
@@ -833,16 +857,16 @@ model Payments {
   paidAt            DateTime       @default(now()) @map("paid_at")
   createdAt         DateTime       @default(now()) @map("created_at")
 
-  order                TransportOrders        @relation("ORDERS_PAYMENTS", fields: [orderId], references: [id])
-  customer             CustomerProfiles       @relation("CUSTOMER_PAYMENTS", fields: [customerId], references: [id])
-  paymentsTransactions PaymentsTransactions[] @relation("PAYMENTS_TRANSACTIONS")
-  refunds              Refunds[]              @relation("PAYMENT_REFUNDS")
+  order                TransportOrder       @relation("ORDERS_PAYMENTS", fields: [orderId], references: [id])
+  customer             CustomerProfile      @relation("CUSTOMER_PAYMENTS", fields: [customerId], references: [id])
+  paymentsTransactions PaymentTransaction[] @relation("PAYMENTS_TRANSACTIONS")
+  refunds              Refund[]             @relation("PAYMENT_REFUNDS")
 
   @@map("payments")
   @@schema("PAIDS")
 }
 
-model PaymentsTransactions {
+model PaymentTransaction {
   id               String                       @id @default(uuid())
   paymentId        String                       @map("payment_id")
   transactionType  PAYMENT_TRANSACTIONS_TYPE    @map("transaction_type")
@@ -851,24 +875,24 @@ model PaymentsTransactions {
   providerResponse Json                         @map("provider_response")
   createdAt        DateTime                     @default(now()) @map("created_at")
 
-  payment Payments @relation("PAYMENTS_TRANSACTIONS", fields: [paymentId], references: [id])
+  payment Payment @relation("PAYMENTS_TRANSACTIONS", fields: [paymentId], references: [id])
 
   @@map("payments_transactions")
   @@schema("PAIDS")
 }
 
-model Refunds {
-  id                String                 @id @default(uuid()) // IDENTIFICADOR
-  paymentId         String                 @map("payment_id") // PAGO
-  orderId           String                 @map("order_id") // ORDEN
+model Refund {
+  id                String                 @id @default(uuid())
+  paymentId         String                 @map("payment_id")
+  orderId           String                 @map("order_id")
   amount            Decimal
-  reason            String // RAZON 
-  status            PAYMENTS_REFUND_STATUS // ESTADOS DE LA DEVOLUCION
-  providerReference String?                @map("provider_response") // REFERENCIA EXTERNA
-  createdAt         DateTime               @map("created_at") // FECHA 
+  reason            String
+  status            PAYMENTS_REFUND_STATUS
+  providerReference String?                @map("provider_response")
+  createdAt         DateTime               @map("created_at")
 
-  order   TransportOrders @relation("REFUNDS_ORDERS", fields: [orderId], references: [id])
-  payment Payments        @relation("PAYMENT_REFUNDS", fields: [paymentId], references: [id])
+  order   TransportOrder @relation("REFUNDS_ORDERS", fields: [orderId], references: [id])
+  payment Payment        @relation("PAYMENT_REFUNDS", fields: [paymentId], references: [id])
 
   @@index([orderId])
   @@index([paymentId])
@@ -876,17 +900,17 @@ model Refunds {
   @@schema("PAIDS")
 }
 
-model NOTIFICATIONS {
-  id               String            @id @default(uuid()) // IDENTIFICADOR
-  userId           String            @map("user_id") // USUARIO DESTINO 
-  title            String // TITULO 
-  message          String // MENSAJE
-  notificationType NOTIFICATION_TYPE @map("notification_type") // TIPO DE NOTIFICACION: ORDER_UPDATE, PAYMENT, INCIDENT, PROMOTION, SYSTEM
-  data             Json // METADATA
-  readAt           DateTime?         @map("read_at") // FECHA DE LECTURA
-  createdAt        DateTime          @default(now()) @map("created_at") // FECHA
+model Notification {
+  id               String            @id @default(uuid())
+  userId           String            @map("user_id")
+  title            String
+  message          String
+  notificationType NOTIFICATION_TYPE @map("notification_type")
+  data             Json
+  readAt           DateTime?         @map("read_at")
+  createdAt        DateTime          @default(now()) @map("created_at")
 
-  user Users @relation("NOTIFICATIONS_USERS", fields: [userId], references: [id])
+  user User @relation("NOTIFICATIONS_USERS", fields: [userId], references: [id])
 
   @@index([userId])
   @@index([title])
@@ -894,48 +918,48 @@ model NOTIFICATIONS {
   @@schema("NOTIFICATIONS")
 }
 
-model SYSTEM_PARAMETERS {
-  id          String       @id @default(uuid()) // IDENTIFICADOR
-  key         String       @unique // Nombre del parametro
-  value       String // Valor
-  valueType   SYSTEM_VALUE @map("value_type") // STRING, NUMBER, BOOLEAN, JSON
-  description String // Descripcion 
-  updatedBy   String       @map("updated_by") // Usuario
-  updatedAt   DateTime     @updatedAt // Fecha 
+model SystemParameter {
+  id          String       @id @default(uuid())
+  key         String       @unique
+  value       String
+  valueType   SYSTEM_VALUE @map("value_type")
+  description String
+  updatedBy   String       @map("updated_by")
+  updatedAt   DateTime     @updatedAt
 
-  user Users @relation("UPDATED_USER", fields: [updatedBy], references: [id])
+  user User @relation("UPDATED_USER", fields: [updatedBy], references: [id])
 
   @@index([key])
   @@map("system_parameters")
   @@schema("ADMINISTRATION")
 }
 
-model CATALOGS {
-  id        String  @id @default(uuid()) // Identificador
-  groupKey  String  @map("group_key") // Grupo 
-  code      String // Codigo 
-  label     String // Etiqueta visible
-  sortOrder Int     @map("sort_order") // Orden 
-  isActive  Boolean @map("is_active") // Estado 
+model Catalog {
+  id        String  @id @default(uuid())
+  groupKey  String  @map("group_key")
+  code      String
+  label     String
+  sortOrder Int     @map("sort_order")
+  isActive  Boolean @map("is_active")
 
   @@index([code])
   @@map("catalogs")
   @@schema("ADMINISTRATION")
 }
 
-model AuditLogs {
-  id          String   @id @default(uuid()) // Identificador
-  actorUserId String?  @map("actor_user_id") // Usuario que ejecuto
-  action      String // Accion realizada
-  entityType  String   @map("entity_type") // Tabla o modulo afectado
-  entityId    String   @map("entity_id") // ID Afectado 
-  oldValues   Json?    @map("old_values") // Valores anteriores
-  newValues   Json?    @map("new_values") // Valores nuevos
-  ipAddress   String?  @map("ip_address") // IP
-  userAgent   String?  @map("user_agent") // Navegador/Dispositivo
-  createdAt   DateTime @map("created_at") // Fecha 
+model AuditLog {
+  id          String   @id @default(uuid())
+  actorUserId String?  @map("actor_user_id")
+  action      String
+  entityType  String   @map("entity_type")
+  entityId    String   @map("entity_id")
+  oldValues   Json?    @map("old_values")
+  newValues   Json?    @map("new_values")
+  ipAddress   String?  @map("ip_address")
+  userAgent   String?  @map("user_agent")
+  createdAt   DateTime @map("created_at")
 
-  user Users? @relation("AUDIT_USERS", fields: [actorUserId], references: [id])
+  user User? @relation("AUDIT_USERS", fields: [actorUserId], references: [id])
 
   @@index([entityId])
   @@index([ipAddress])
@@ -943,28 +967,28 @@ model AuditLogs {
   @@schema("AUDIT")
 }
 
-model WEBHOOKEVENTS {
-  id              String   @id @default(uuid()) // Identificador
-  eventType       String   @map("event_type") // Tipo de evento 
-  externalEventId String   @map("external_event_id") // ID Externo 
-  payload         Json // Payload Recibido
-  processed       Boolean // Si fue procesado
-  processedAt     DateTime @map("processed_at") // Fecha de procesamiento
-  createdAt       DateTime @map("created_at") // Fecha de recepcion 
+model WebhookEvent {
+  id              String   @id @default(uuid())
+  eventType       String   @map("event_type")
+  externalEventId String   @map("external_event_id")
+  payload         Json
+  processed       Boolean
+  processedAt     DateTime @map("processed_at")
+  createdAt       DateTime @map("created_at")
 
   @@map("webhook_events")
   @@schema("INTEGRATIONS")
 }
 
-model EXTERNALAPIOGS {
-  id              String   @id @default(uuid()) // Identificador
-  provider        String // Google Maps, FCM, Payment Gateway, etc
-  endpoint        String // Endpoint Usado
-  requestPayload  Json?    @map("request_payload") // Solicitud
-  responsePayload Json?    @map("response_payload") // Respuesta 
-  statusCode      Int?     @map("status_code") // Codigo HTTP
-  success         Boolean // Resultado 
-  createdAt       DateTime @map("created_at") // Fecha
+model ExternalApiLog {
+  id              String   @id @default(uuid())
+  provider        String
+  endpoint        String
+  requestPayload  Json?    @map("request_payload")
+  responsePayload Json?    @map("response_payload")
+  statusCode      Int?     @map("status_code")
+  success         Boolean
+  createdAt       DateTime @map("created_at")
 
   @@index([requestPayload])
   @@index([responsePayload])
