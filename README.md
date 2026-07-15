@@ -1,98 +1,240 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+# RUTA RD Transport API
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+API NestJS para el monolito modular de transporte: identidad, perfiles de cliente, operaciones, tracking, facturacion, soporte y administracion.
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+## Stack
 
-## Description
+- NestJS 11
+- Prisma 7 + PostgreSQL
+- JWT access/refresh tokens con sesiones revocables
+- Swagger en desarrollo
+- Pino logger con `x-request-id`
+- Validacion global con `class-validator`
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
-
-## Project setup
+## Setup
 
 ```bash
-$ pnpm install
+pnpm install
+cp .env.example .env
+pnpm run db:generate
+pnpm run db:migrate
+pnpm run db:seed
 ```
 
-## Compile and run the project
+## Desarrollo
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+pnpm run start:dev
 ```
 
-## Run tests
+Por defecto la API queda en `http://localhost:3000/api/v1`.
+
+Swagger queda disponible en `http://localhost:3000/api/docs` cuando `SWAGGER_ENABLED=true` y `NODE_ENV` no es `production`.
+
+## Scripts
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+pnpm run build
+pnpm run test
+pnpm run test:e2e
+pnpm run lint
+pnpm run db:migrate
+pnpm run db:deploy
+pnpm run db:generate
+pnpm run db:seed
 ```
 
-## Deployment
+## Endpoints Implementados
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+Publicos:
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+- `GET /api/v1/health`
+- `POST /api/v1/auth/login`
+- `POST /api/v1/auth/register`
+- `POST /api/v1/auth/refresh`
+
+Autenticacion y sesiones:
+
+- `POST /api/v1/auth/logout`
+- `POST /api/v1/auth/logout-all`
+- `GET /api/v1/auth/me`
+- `GET /api/v1/sessions/me`
+- `DELETE /api/v1/sessions/:id`
+- `DELETE /api/v1/sessions/users/:userId`
+
+Usuarios y roles:
+
+- `GET /api/v1/users`
+- `GET /api/v1/users/me`
+- `PATCH /api/v1/users/me`
+- `GET /api/v1/users/:id`
+- `GET /api/v1/roles`
+- `POST /api/v1/roles/assign`
+- `POST /api/v1/roles/revoke`
+
+Clientes:
+
+- `GET /api/v1/customers/me`
+- `POST /api/v1/customers/me`
+- `PATCH /api/v1/customers/me`
+- `GET /api/v1/customers/me/addresses`
+- `POST /api/v1/customers/me/addresses`
+- `PATCH /api/v1/customers/me/addresses/:id`
+- `DELETE /api/v1/customers/me/addresses/:id`
+
+Transporte:
+
+- `GET /api/v1/vehicle-categories`
+- `POST /api/v1/vehicle-categories`
+- `PATCH /api/v1/vehicle-categories/:id`
+- `DELETE /api/v1/vehicle-categories/:id`
+- `POST /api/v1/routes/estimate`
+- `GET /api/v1/pricing/rate-cards`
+- `POST /api/v1/pricing/rate-cards`
+- `PATCH /api/v1/pricing/rate-cards/:id`
+- `GET /api/v1/pricing/rate-cards/:id/rules`
+- `POST /api/v1/pricing/rate-cards/:id/rules`
+- `POST /api/v1/pricing/quotes`
+- `GET /api/v1/pricing/quotes/:id`
+- `POST /api/v1/orders`
+- `GET /api/v1/orders`
+- `GET /api/v1/orders/:id`
+- `PATCH /api/v1/orders/:id/status`
+- `POST /api/v1/orders/:id/cancel`
+- `GET /api/v1/orders/:id/events`
+- `GET /api/v1/reservations`
+- `POST /api/v1/reservations`
+- `PATCH /api/v1/reservations/:id/reschedule`
+- `PATCH /api/v1/reservations/:id/cancel`
+- `PATCH /api/v1/reservations/:id/complete`
+
+Operaciones:
+
+- `GET /api/v1/drivers`
+- `GET /api/v1/drivers/me`
+- `POST /api/v1/drivers`
+- `GET /api/v1/drivers/:id`
+- `PATCH /api/v1/drivers/:id/status`
+- `PATCH /api/v1/drivers/:id/verification`
+- `GET /api/v1/vehicles`
+- `POST /api/v1/vehicles`
+- `GET /api/v1/vehicles/:id`
+- `PATCH /api/v1/vehicles/:id`
+- `GET /api/v1/vehicles/:id/documents`
+- `POST /api/v1/vehicles/:id/documents`
+- `GET /api/v1/assignments`
+- `POST /api/v1/assignments`
+- `PATCH /api/v1/assignments/:id/accept`
+- `PATCH /api/v1/assignments/:id/reject`
+- `PATCH /api/v1/assignments/:id/complete`
+- `GET /api/v1/dispatch/pending-orders`
+- `GET /api/v1/dispatch/available-drivers`
+- `POST /api/v1/dispatch`
+
+Tracking:
+
+- `POST /api/v1/locations`
+- `GET /api/v1/locations/orders/:orderId`
+- `GET /api/v1/locations/orders/:orderId/latest`
+- `POST /api/v1/trips/start`
+- `PATCH /api/v1/trips/:id/end`
+- `GET /api/v1/trips/orders/:orderId`
+- `POST /api/v1/order-events`
+- `GET /api/v1/order-events/orders/:orderId`
+- `GET /api/v1/eta/orders/:orderId`
+
+Soporte:
+
+- `GET /api/v1/attachments`
+- `POST /api/v1/attachments`
+- `GET /api/v1/notifications/me`
+- `POST /api/v1/notifications`
+- `PATCH /api/v1/notifications/:id/read`
+- `GET /api/v1/incidents`
+- `POST /api/v1/incidents`
+- `PATCH /api/v1/incidents/:id/status`
+- `POST /api/v1/incidents/:id/comments`
+- `GET /api/v1/delivery-proofs`
+- `POST /api/v1/delivery-proofs`
+- `PATCH /api/v1/delivery-proofs/:id/validate`
+- `POST /api/v1/delivery-proofs/:id/signatures`
+
+Facturacion interna/mock:
+
+- `GET /api/v1/payments`
+- `POST /api/v1/payments`
+- `GET /api/v1/payments/:id`
+- `PATCH /api/v1/payments/:id/status`
+- `GET /api/v1/transactions`
+- `POST /api/v1/transactions`
+- `GET /api/v1/refunds`
+- `POST /api/v1/refunds`
+- `PATCH /api/v1/refunds/:id/status`
+- `GET /api/v1/cancellation-fees/orders/:orderId`
+- `GET /api/v1/webhooks`
+- `POST /api/v1/webhooks/internal`
+
+Administracion:
+
+- `GET /api/v1/catalogs`
+- `POST /api/v1/catalogs`
+- `PATCH /api/v1/catalogs/:id`
+- `GET /api/v1/parameters`
+- `PUT /api/v1/parameters`
+- `GET /api/v1/audit`
+- `GET /api/v1/dashboard/summary`
+- `GET /api/v1/reports/operations`
+- `GET /api/v1/reports/billing`
+
+## Flujo de Cliente
+
+1. `POST /auth/register` crea el usuario y asigna el rol `CUSTOMER`.
+2. `POST /customers/me` crea el perfil de cliente con documento y datos fiscales.
+3. `POST /customers/me/addresses` registra direcciones de recogida/entrega.
+4. `POST /routes/estimate` estima distancia/duracion con proveedor interno.
+5. `POST /pricing/quotes` crea una cotizacion interna/mock.
+6. `POST /orders` crea la orden desde una cotizacion valida.
+7. Operaciones usa `POST /dispatch` o `POST /assignments` para asignar conductor/vehiculo.
+8. Tracking, evidencias, incidentes y pagos avanzan el ciclo operativo sin proveedores externos.
+
+El perfil de cliente es separado del registro para permitir onboarding progresivo.
+
+## Respuestas
+
+Las respuestas exitosas usan el envelope global:
+
+```json
+{
+  "success": true,
+  "data": {},
+  "meta": {
+    "requestId": "uuid",
+    "timestamp": "2026-07-15T00:00:00.000Z"
+  }
+}
+```
+
+Los errores usan:
+
+```json
+{
+  "success": false,
+  "error": {
+    "code": "VALIDATION_FAILED",
+    "message": "Validation failed"
+  },
+  "meta": {
+    "requestId": "uuid",
+    "timestamp": "2026-07-15T00:00:00.000Z",
+    "path": "/api/v1/resource"
+  }
+}
+```
+
+## Verificacion
 
 ```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+pnpm exec tsc --noEmit --incremental false --pretty false
+pnpm exec eslint "{src,test}/**/*.ts"
+pnpm run test:e2e
 ```
-
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
-
-## Resources
-
-Check out a few resources that may come in handy when working with NestJS:
-
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
-
-## Support
-
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
-
-## Stay in touch
-
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
-
-## License
-
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).

@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AddressesModule } from './addresses/addresses.module';
 import { AuthModule } from './auth/auth.module';
+import { CustomersModule } from './customers/customers.module';
 import { RolesModule } from './roles/roles.module';
 import { SessionsModule } from './sessions/sessions.module';
 import { UsersModule } from './users/users.module';
@@ -11,6 +12,7 @@ import { UsersModule } from './users/users.module';
     RolesModule,
     SessionsModule,
     AuthModule,
+    CustomersModule,
     AddressesModule,
   ],
 })
