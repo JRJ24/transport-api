@@ -1,4 +1,7 @@
 allowBuilds:
   '@prisma/engines': false
+  aws-sdk: false
+  bcrypt: false
+  esbuild: false
   prisma: false
   unrs-resolver: false
