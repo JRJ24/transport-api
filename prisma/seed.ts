@@ -2,8 +2,8 @@ import 'dotenv/config';
 
 import * as bcrypt from 'bcrypt';
 import { PrismaPg } from '@prisma/adapter-pg';
-import { PrismaClient } from '../generated/prisma/client';
-import { ROLES, SYSTEM_VALUE } from '../generated/prisma/enums';
+import { PrismaClient } from '../src/generated/prisma/client';
+import { ROLES, SYSTEM_VALUE } from '../src/generated/prisma/enums';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -115,9 +115,19 @@ const RATE_RULE_SEED: Record<
 
 const CATALOG_SEED = [
   { groupKey: 'payment-methods', code: 'CARD', label: 'Tarjeta', sortOrder: 1 },
-  { groupKey: 'payment-methods', code: 'CASH', label: 'Efectivo', sortOrder: 2 },
+  {
+    groupKey: 'payment-methods',
+    code: 'CASH',
+    label: 'Efectivo',
+    sortOrder: 2,
+  },
   { groupKey: 'incident-severity', code: 'LOW', label: 'Baja', sortOrder: 1 },
-  { groupKey: 'incident-severity', code: 'MEDIUM', label: 'Media', sortOrder: 2 },
+  {
+    groupKey: 'incident-severity',
+    code: 'MEDIUM',
+    label: 'Media',
+    sortOrder: 2,
+  },
   { groupKey: 'incident-severity', code: 'HIGH', label: 'Alta', sortOrder: 3 },
 ];
 
