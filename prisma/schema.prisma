@@ -2,8 +2,8 @@
 // learn more about it in the docs: https://pris.ly/d/prisma-schema
 
 generator client {
-  provider = "prisma-client"
-  output   = "../src/generated/prisma"
+  provider     = "prisma-client"
+  output       = "../src/generated/prisma"
   moduleFormat = "cjs"
 }
 
@@ -280,6 +280,24 @@ enum NOTIFICATION_TYPE {
   @@schema("NOTIFICATIONS")
 }
 
+enum NOTIFICATION_STATUS {
+  PENDING
+  SENT
+  PARTIAL
+  FAILED
+  SKIPPED
+
+  @@schema("NOTIFICATIONS")
+}
+
+enum DEVICE_PLATFORM {
+  ANDROID
+  IOS
+  WEB
+
+  @@schema("NOTIFICATIONS")
+}
+
 enum SYSTEM_VALUE {
   STRING
   NUMBER
@@ -310,6 +328,7 @@ model User {
   incidents         Incident[]        @relation("USER_REPORTED")
   incidentsComments IncidentComment[] @relation("USER_INCIDENTS_COMMENTS")
   notifications     Notification[]    @relation("NOTIFICATIONS_USERS")
+  deviceTokens      DeviceToken[]     @relation("DEVICE_TOKENS_USERS")
   auditLogs         AuditLog[]        @relation("AUDIT_USERS")
   systemParameters  SystemParameter[] @relation("UPDATED_USER")
 
@@ -469,6 +488,7 @@ model Vehicle {
   model       String
   year        Int
   color       String
+  urlImage    String?        @map("url_image")
   status      STATUS_VEHICLE @default(ACTIVE)
   createdAt   DateTime       @map("created_at")
 
@@ -608,8 +628,8 @@ model OrderStop {
   addressLine  String    @map("address_line")
   city         String
   province     String
-  latitude     Decimal
-  longitude    Decimal
+  latitude     Decimal   @db.Decimal(9, 6)
+  longitude    Decimal   @db.Decimal(9, 6)
   instructions String?
   arrivedAt    DateTime? @map("arrived_at")
   completedAt  DateTime? @map("completed_at")
@@ -674,12 +694,13 @@ model OrderEvent {
   actorUserId String     @map("actor_user_id")
   description String
   metadata    Json
-  latitude    Decimal?
-  longitude   Decimal
+  latitude    Decimal?   @db.Decimal(9, 6)
+  longitude   Decimal?   @db.Decimal(9, 6)
   createdAt   DateTime   @default(now()) @map("created_at")
 
   order TransportOrder @relation("ORDEREVENTS_TRANSPORTORDER", fields: [orderId], references: [id])
 
+  @@index([orderId, createdAt])
   @@map("order_events")
   @@schema("ORDERS")
 }
@@ -720,17 +741,30 @@ model DriverLocation {
   id           String   @id @default(uuid())
   driverId     String   @map("driver_id")
   orderId      String   @map("order_id")
-  latitude     Decimal
-  longitude    Decimal
-  accuracy     Decimal?
-  speed        Decimal?
+  sessionId    String?  @map("session_id")
+  vehicleId    String?  @map("vehicle_id")
+  latitude     Decimal  @db.Decimal(9, 6)
+  longitude    Decimal  @db.Decimal(9, 6)
+  accuracy     Decimal? @db.Decimal(8, 2)
+  altitude     Decimal? @db.Decimal(8, 2)
+  speed        Decimal? @db.Decimal(8, 2)
+  heading      Decimal? @db.Decimal(6, 2)
   batteryLevel Int?     @map("battery_level")
+  sequence     Int?
+  isMocked     Boolean  @default(false) @map("is_mocked")
+  clientId     String?  @map("client_id")
   recordedAt   DateTime @map("recorded_at")
   receivedAt   DateTime @map("received_at")
 
-  order  TransportOrder @relation("ORDER_DRIVERLOCATIONS", fields: [orderId], references: [id])
-  driver DriverProfile  @relation("DRIVER_LOCATIONS", fields: [driverId], references: [id])
+  order   TransportOrder   @relation("ORDER_DRIVERLOCATIONS", fields: [orderId], references: [id])
+  driver  DriverProfile    @relation("DRIVER_LOCATIONS", fields: [driverId], references: [id])
+  session TrackingSession? @relation("SESSION_LOCATIONS", fields: [sessionId], references: [id])
 
+  @@unique([sessionId, clientId], name: "session_client_idempotency")
+  @@index([sessionId, recordedAt])
+  @@index([orderId, recordedAt])
+  @@index([driverId, recordedAt])
+  @@index([vehicleId, recordedAt])
   @@map("driver_locations")
   @@schema("DRIVERS")
 }
@@ -744,9 +778,12 @@ model TrackingSession {
   status         TRACKING_SESSIONS
   lastLocationAt DateTime?         @map("last_location_at")
 
-  order  TransportOrder @relation("ORDER_TRACKING", fields: [orderId], references: [id])
-  driver DriverProfile  @relation("DRIVER_TRACKING", fields: [driverId], references: [id])
+  order     TransportOrder   @relation("ORDER_TRACKING", fields: [orderId], references: [id])
+  driver    DriverProfile    @relation("DRIVER_TRACKING", fields: [driverId], references: [id])
+  locations DriverLocation[] @relation("SESSION_LOCATIONS")
 
+  @@index([orderId, status])
+  @@index([driverId, status])
   @@map("tracking_sessions")
   @@schema("TRACKING")
 }
@@ -855,7 +892,7 @@ model Payment {
   paymentProvider   String?        @map("payment_provider")
   status            PAYMENT_STATUS
   providerReference String?
-  paidAt            DateTime       @default(now()) @map("paid_at")
+  paidAt            DateTime?      @map("paid_at")
   createdAt         DateTime       @default(now()) @map("created_at")
 
   order                TransportOrder       @relation("ORDERS_PAYMENTS", fields: [orderId], references: [id])
@@ -902,20 +939,48 @@ model Refund {
 }
 
 model Notification {
-  id               String            @id @default(uuid())
-  userId           String            @map("user_id")
+  id               String              @id @default(uuid())
+  userId           String              @map("user_id")
   title            String
   message          String
-  notificationType NOTIFICATION_TYPE @map("notification_type")
+  notificationType NOTIFICATION_TYPE   @map("notification_type")
   data             Json
-  readAt           DateTime?         @map("read_at")
-  createdAt        DateTime          @default(now()) @map("created_at")
+  status           NOTIFICATION_STATUS @default(PENDING)
+  sentAt           DateTime?           @map("sent_at")
+  failureReason    String?             @map("failure_reason")
+  readAt           DateTime?           @map("read_at")
+  createdAt        DateTime            @default(now()) @map("created_at")
 
   user User @relation("NOTIFICATIONS_USERS", fields: [userId], references: [id])
 
   @@index([userId])
   @@index([title])
+  @@index([userId, readAt, createdAt])
+  @@index([status, createdAt])
   @@map("notifications")
+  @@schema("NOTIFICATIONS")
+}
+
+model DeviceToken {
+  id             String          @id @default(uuid())
+  userId         String          @map("user_id")
+  token          String          @unique
+  platform       DEVICE_PLATFORM
+  installationId String          @map("installation_id")
+  deviceName     String?         @map("device_name")
+  appVersion     String?         @map("app_version")
+  locale         String?
+  isActive       Boolean         @default(true) @map("is_active")
+  failureCount   Int             @default(0) @map("failure_count")
+  lastUsedAt     DateTime        @default(now()) @map("last_used_at")
+  createdAt      DateTime        @default(now()) @map("created_at")
+  updatedAt      DateTime        @updatedAt @map("updated_at")
+
+  user User @relation("DEVICE_TOKENS_USERS", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, installationId], name: "user_installation")
+  @@index([userId, isActive])
+  @@map("device_tokens")
   @@schema("NOTIFICATIONS")
 }
 

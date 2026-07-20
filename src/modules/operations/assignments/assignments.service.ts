@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import type { OrderAssignment, Prisma } from '@generated/prisma/client';
 import {
   ASSIGNMENT_STATUS,
@@ -8,11 +8,46 @@ import {
 } from '@generated/prisma/enums';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
+import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import type { CreateAssignmentDto } from './dto/create-assignment.dto';
 
 @Injectable()
 export class AssignmentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  private readonly logger = new Logger(AssignmentsService.name);
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly notifications: NotificationDispatcherService,
+  ) {}
+
+  /** Notifies the assigned driver about a new order (best-effort). */
+  private async notifyDriverAssigned(
+    driverId: string,
+    orderId: string,
+  ): Promise<void> {
+    try {
+      const [driver, order] = await Promise.all([
+        this.prisma.driverProfile.findUnique({
+          where: { id: driverId },
+          select: { userId: true },
+        }),
+        this.prisma.transportOrder.findUnique({
+          where: { id: orderId },
+          select: { orderCode: true },
+        }),
+      ]);
+      if (driver) {
+        await this.notifications.dispatch(driver.userId, 'ORDER_ASSIGNED', {
+          orderId,
+          orderCode: order?.orderCode,
+        });
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify driver of assignment: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
+  }
 
   list(): Promise<OrderAssignment[]> {
     return this.prisma.orderAssignment.findMany({
@@ -25,12 +60,32 @@ export class AssignmentsService {
     });
   }
 
-  create(
+  async listMine(user: AuthenticatedUser): Promise<OrderAssignment[]> {
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { userId: user.id },
+    });
+
+    if (!driver) {
+      return [];
+    }
+
+    return this.prisma.orderAssignment.findMany({
+      where: { driverId: driver.id },
+      include: {
+        order: { include: { orderStops: true, orderItems: true } },
+        driver: { include: { user: true } },
+        vehicle: true,
+      },
+      orderBy: { assignedAt: 'desc' },
+    });
+  }
+
+  async create(
     user: AuthenticatedUser,
     dto: CreateAssignmentDto,
   ): Promise<OrderAssignment> {
-    return this.prisma.$transaction(async (tx) => {
-      const assignment = await tx.orderAssignment.create({
+    const assignment = await this.prisma.$transaction(async (tx) => {
+      const created = await tx.orderAssignment.create({
         data: {
           orderId: dto.orderId,
           driverId: dto.driverId,
@@ -50,8 +105,11 @@ export class AssignmentsService {
       });
       await this.recordEvent(tx, dto.orderId, user.id, EVENT_TYPE.ASSIGNED);
 
-      return assignment;
+      return created;
     });
+
+    await this.notifyDriverAssigned(dto.driverId, dto.orderId);
+    return assignment;
   }
 
   accept(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {

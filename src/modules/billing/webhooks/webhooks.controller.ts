@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import { Body, Controller, Get, Headers, Post } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { WebhookEvent } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
@@ -25,5 +25,25 @@ export class WebhooksController {
   @Post('internal')
   receive(@Body() dto: CreateWebhookEventDto): Promise<WebhookEvent> {
     return this.service.receive(dto);
+  }
+
+  @ApiOperation({ summary: 'Receive CardNet payment webhook' })
+  @Public()
+  @Post('cardnet')
+  receiveCardnet(
+    @Body() payload: Record<string, unknown>,
+    @Headers('x-cardnet-signature') signature?: string,
+  ): Promise<WebhookEvent> {
+    return this.service.receiveProvider('cardnet', payload, signature);
+  }
+
+  @ApiOperation({ summary: 'Receive Azul payment webhook' })
+  @Public()
+  @Post('azul')
+  receiveAzul(
+    @Body() payload: Record<string, unknown>,
+    @Headers('x-azul-signature') signature?: string,
+  ): Promise<WebhookEvent> {
+    return this.service.receiveProvider('azul', payload, signature);
   }
 }

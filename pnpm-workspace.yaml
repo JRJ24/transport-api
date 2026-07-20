@@ -1,7 +1,10 @@
 allowBuilds:
+  '@firebase/util': false
   '@prisma/engines': false
   '@scarf/scarf': false
   bcrypt: false
   esbuild: false
+  msgpackr-extract: false
   prisma: false
+  protobufjs: false
   unrs-resolver: false

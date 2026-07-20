@@ -61,4 +61,13 @@ export default tseslint.config(
       ],
     },
   },
+
+  {
+    // Tests may use loose mocks and unbound method references.
+    files: ['**/*.spec.ts', '**/*.e2e-spec.ts'],
+    rules: {
+      '@typescript-eslint/unbound-method': 'off',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'off',
+    },
+  },
 );

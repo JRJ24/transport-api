@@ -6,24 +6,69 @@ import {
 } from '@nestjs/common';
 import type { Prisma, TransportOrder } from '@generated/prisma/client';
 import {
+  ASSIGNMENT_STATUS,
   EVENT_TYPE,
   PAYMENT_STATUS,
+  RESERVATIONS_STATUS,
   ROLES,
   SERVICE_TYPE,
   STATUS_ORDERS,
+  STOP_TYPE,
 } from '@generated/prisma/enums';
+import type { OrderAssignment } from '@generated/prisma/client';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import { DomainException } from '@/common/exceptions/domain.exception';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
+import { RealtimeService } from '@/modules/realtime/realtime.service';
+import { AssignmentsService } from '@/modules/operations/assignments/assignments.service';
 import type { CancelOrderDto } from './dto/cancel-order.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
+import type { CreateTmsOrderDto } from './dto/create-tms-order.dto';
 import type { OrderQueryDto } from './dto/order-query.dto';
 import type { UpdateOrderStatusDto } from './dto/update-order-status.dto';
+
+/**
+ * Allowed order-status transitions. Terminal states have no outgoing edges.
+ */
+const STATUS_TRANSITIONS: Record<STATUS_ORDERS, STATUS_ORDERS[]> = {
+  [STATUS_ORDERS.DRAFT]: [STATUS_ORDERS.REQUESTED, STATUS_ORDERS.CANCELLED],
+  [STATUS_ORDERS.REQUESTED]: [STATUS_ORDERS.ASSIGNED, STATUS_ORDERS.CANCELLED],
+  [STATUS_ORDERS.ASSIGNED]: [
+    STATUS_ORDERS.ACCEPTED,
+    STATUS_ORDERS.REQUESTED,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.ACCEPTED]: [
+    STATUS_ORDERS.IN_PROGRESS,
+    STATUS_ORDERS.FAILED,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.IN_PROGRESS]: [
+    STATUS_ORDERS.DELIVERED,
+    STATUS_ORDERS.FAILED,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.DELIVERED]: [],
+  [STATUS_ORDERS.CANCELLED]: [],
+  [STATUS_ORDERS.FAILED]: [],
+};
+
+/** Transitions a DRIVER may perform themselves (start service, complete, fail). */
+const DRIVER_TRANSITIONS = new Set<STATUS_ORDERS>([
+  STATUS_ORDERS.IN_PROGRESS,
+  STATUS_ORDERS.DELIVERED,
+  STATUS_ORDERS.FAILED,
+]);
 
 const ORDER_INCLUDE = {
   orderStops: true,
   orderItems: true,
-  orderAssignments: true,
+  customer: { include: { user: true } },
+  vehicleCategory: true,
+  orderAssignments: {
+    include: { driver: { include: { user: true } }, vehicle: true },
+  },
   orderEvents: { orderBy: { createdAt: 'asc' as const } },
   reservations: true,
   payments: true,
@@ -31,7 +76,11 @@ const ORDER_INCLUDE = {
 
 @Injectable()
 export class OrdersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly realtime: RealtimeService,
+    private readonly assignments: AssignmentsService,
+  ) {}
 
   async create(
     user: AuthenticatedUser,
@@ -136,6 +185,140 @@ export class OrdersService {
     });
   }
 
+  async createFromTms(
+    user: AuthenticatedUser,
+    dto: CreateTmsOrderDto,
+  ): Promise<TransportOrder> {
+    if (dto.serviceType === SERVICE_TYPE.SCHEDULED && !dto.scheduleAt) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'scheduleAt is required for scheduled orders',
+      });
+    }
+
+    const [customer, vehicleCategory] = await Promise.all([
+      this.prisma.customerProfile.findUnique({ where: { id: dto.customerId } }),
+      this.prisma.vehicleCategory.findUnique({
+        where: { id: dto.vehicleCategoryId },
+      }),
+    ]);
+
+    if (!customer) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Customer profile not found',
+      });
+    }
+
+    if (!vehicleCategory) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Vehicle category not found',
+      });
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const quote = dto.quoteId
+        ? await tx.priceQuote.findFirst({
+            where: { id: dto.quoteId, customerId: dto.customerId },
+          })
+        : await tx.priceQuote.create({
+            data: {
+              customerId: dto.customerId,
+              vehicleCategoryId: dto.vehicleCategoryId,
+              originAddress: this.addressForQuote(dto, STOP_TYPE.PICKUP),
+              destinationAddress: this.addressForQuote(dto, STOP_TYPE.DROPOFF),
+              distanceKm: dto.distanceKm,
+              estimatedDurationMin: Math.round(dto.estimatedDurationMin),
+              baseAmount: dto.totalAmount,
+              extrasAmount: 0,
+              demandAmount: 0,
+              weatherAmount: 0,
+              taxAmount: 0,
+              totalAmount: dto.totalAmount,
+              expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
+            },
+          });
+
+      if (!quote) {
+        throw new NotFoundException({
+          code: ERROR_CODES.RESOURCE_NOT_FOUND,
+          message: 'Price quote not found for this customer',
+        });
+      }
+
+      const order = await tx.transportOrder.create({
+        data: {
+          orderCode: this.generateOrderCode(),
+          customerId: dto.customerId,
+          quoteId: quote.id,
+          vehicleCategoryId: dto.vehicleCategoryId,
+          serviceType: dto.serviceType,
+          status: STATUS_ORDERS.REQUESTED,
+          scheduleAt: dto.scheduleAt ?? null,
+          distanceKm: dto.distanceKm,
+          estimatedDurationMin: Math.round(dto.estimatedDurationMin),
+          totalAmount: dto.totalAmount,
+          paymentStatus: PAYMENT_STATUS.PENDING,
+          notes: dto.notes?.trim() ?? '',
+          orderStops: {
+            create: dto.stops.map((stop) => ({
+              stopType: stop.stopType,
+              sequence: stop.sequence,
+              contactName: stop.contactName.trim(),
+              contactPhone: stop.contactPhone.trim(),
+              addressLine: stop.addressLine.trim(),
+              city: stop.city.trim(),
+              province: stop.province.trim(),
+              latitude: stop.latitude,
+              longitude: stop.longitude,
+              instructions: stop.instructions?.trim() ?? null,
+            })),
+          },
+          orderItems: {
+            create: dto.items.map((item) => ({
+              description: item.description.trim(),
+              quantity: item.quantity,
+              weightKg: item.weightKg,
+              volumeM3: item.volumeM3 ?? null,
+              declaredValue: item.declaredValue ?? null,
+              fragile: item.fragile ?? false,
+              requireHelper: item.requireHelper ?? false,
+            })),
+          },
+          orderEvents: {
+            create: {
+              eventType: EVENT_TYPE.CREATED,
+              actorUserId: user.id,
+              description: 'Order created from TMS',
+              metadata: { source: 'transport-portal' },
+              latitude: null,
+              longitude: 0,
+            },
+          },
+        },
+        include: ORDER_INCLUDE,
+      });
+
+      if (dto.serviceType === SERVICE_TYPE.SCHEDULED && dto.scheduleAt) {
+        await tx.reservation.create({
+          data: {
+            orderId: order.id,
+            reservedFor: dto.scheduleAt,
+            reservationStatus: RESERVATIONS_STATUS.ACTIVE,
+            rescheduleCount: 0,
+            cancellationDeadline: new Date(
+              dto.scheduleAt.getTime() - 60 * 60_000,
+            ),
+            createdAt: new Date(),
+          },
+        });
+      }
+
+      return order;
+    });
+  }
+
   async findAll(
     user: AuthenticatedUser,
     query: OrderQueryDto,
@@ -170,6 +353,7 @@ export class OrdersService {
     }
 
     await this.assertCanReadOrder(user, order.customerId);
+    await this.assertDriverCanAccessOrder(user, id);
 
     return order;
   }
@@ -181,8 +365,22 @@ export class OrdersService {
   ): Promise<TransportOrder> {
     const now = new Date();
 
-    return this.prisma.$transaction(async (tx) => {
-      const order = await tx.transportOrder.update({
+    const current = await this.prisma.transportOrder.findUnique({
+      where: { id },
+      select: { status: true },
+    });
+    if (!current) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Order not found',
+      });
+    }
+
+    await this.assertDriverCanAccessOrder(user, id);
+    this.assertStatusTransition(user, current.status, dto.status);
+
+    const order = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.transportOrder.update({
         where: { id },
         data: {
           status: dto.status,
@@ -200,12 +398,57 @@ export class OrdersService {
           description: `Order status changed to ${dto.status}`,
           metadata: { status: dto.status },
           latitude: null,
-          longitude: 0,
+          longitude: null,
         },
       });
 
-      return order;
+      return updated;
     });
+
+    this.realtime.emitOrderStatusChanged({
+      orderId: id,
+      status: dto.status,
+      previousStatus: current.status,
+      changedByUserId: user.id,
+      changedAt: now.toISOString(),
+    });
+
+    return order;
+  }
+
+  /**
+   * Alias for the driver app: accept the order via the driver's own assignment.
+   */
+  async accept(
+    user: AuthenticatedUser,
+    orderId: string,
+  ): Promise<OrderAssignment> {
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { userId: user.id },
+    });
+    if (!driver) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Driver profile not found',
+      });
+    }
+
+    const assignment = await this.prisma.orderAssignment.findFirst({
+      where: {
+        orderId,
+        driverId: driver.id,
+        assignmentStatus: ASSIGNMENT_STATUS.PENDING,
+      },
+      orderBy: { assignedAt: 'desc' },
+    });
+    if (!assignment) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'No pending assignment for this driver on this order',
+      });
+    }
+
+    return this.assignments.accept(assignment.id, user);
   }
 
   async cancel(
@@ -299,6 +542,65 @@ export class OrdersService {
     );
   }
 
+  private isDriverOnly(user: AuthenticatedUser): boolean {
+    return (
+      user.roles.includes(ROLES.DRIVER) &&
+      !user.roles.some(
+        (role) => role === ROLES.ADMIN || role === ROLES.OPERATOR,
+      )
+    );
+  }
+
+  /** A driver may only see/act on orders assigned to them. */
+  private async assertDriverCanAccessOrder(
+    user: AuthenticatedUser,
+    orderId: string,
+  ): Promise<void> {
+    if (!this.isDriverOnly(user)) {
+      return;
+    }
+
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { userId: user.id },
+    });
+    const assignment = driver
+      ? await this.prisma.orderAssignment.findFirst({
+          where: { orderId, driverId: driver.id },
+        })
+      : null;
+
+    if (!assignment) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'This order is not assigned to you',
+      });
+    }
+  }
+
+  private assertStatusTransition(
+    user: AuthenticatedUser,
+    current: STATUS_ORDERS,
+    next: STATUS_ORDERS,
+  ): void {
+    if (current === next) {
+      return;
+    }
+
+    if (!STATUS_TRANSITIONS[current]?.includes(next)) {
+      throw new DomainException(
+        ERROR_CODES.DOMAIN_RULE_VIOLATION,
+        `Illegal order status transition: ${current} → ${next}`,
+      );
+    }
+
+    if (this.isDriverOnly(user) && !DRIVER_TRANSITIONS.has(next)) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: `Drivers cannot set order status to ${next}`,
+      });
+    }
+  }
+
   private eventForStatus(status: STATUS_ORDERS): EVENT_TYPE {
     switch (status) {
       case STATUS_ORDERS.ASSIGNED:
@@ -320,5 +622,15 @@ export class OrdersService {
     const suffix = Math.random().toString(36).slice(2, 8).toUpperCase();
 
     return `ORD-${Date.now()}-${suffix}`;
+  }
+
+  private addressForQuote(dto: CreateTmsOrderDto, stopType: STOP_TYPE): string {
+    const stop =
+      dto.stops.find((candidate) => candidate.stopType === stopType) ??
+      dto.stops.sort((left, right) => left.sequence - right.sequence)[
+        stopType === STOP_TYPE.PICKUP ? 0 : dto.stops.length - 1
+      ];
+
+    return stop?.addressLine.trim() ?? 'TMS order address';
   }
 }

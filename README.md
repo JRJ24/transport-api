@@ -89,6 +89,8 @@ Transporte:
 - `PATCH /api/v1/vehicle-categories/:id`
 - `DELETE /api/v1/vehicle-categories/:id`
 - `POST /api/v1/routes/estimate`
+- `POST /api/v1/routes/compute` (Google Routes API, server-side)
+- `GET /api/v1/routes/orders/:orderId` (ruta cacheada de la orden: polyline + ETA)
 - `GET /api/v1/pricing/rate-cards`
 - `POST /api/v1/pricing/rate-cards`
 - `PATCH /api/v1/pricing/rate-cards/:id`
@@ -99,7 +101,8 @@ Transporte:
 - `POST /api/v1/orders`
 - `GET /api/v1/orders`
 - `GET /api/v1/orders/:id`
-- `PATCH /api/v1/orders/:id/status`
+- `POST /api/v1/orders/:id/accept` (alias para el conductor: acepta su asignacion)
+- `PATCH /api/v1/orders/:id/status` (con maquina de estados por rol)
 - `POST /api/v1/orders/:id/cancel`
 - `GET /api/v1/orders/:id/events`
 - `GET /api/v1/reservations`
@@ -139,6 +142,11 @@ Tracking:
 - `POST /api/v1/trips/start`
 - `PATCH /api/v1/trips/:id/end`
 - `GET /api/v1/trips/orders/:orderId`
+- `POST /api/v1/tracking/sessions` (crear o recuperar sesion activa)
+- `GET /api/v1/tracking/sessions/active`
+- `POST /api/v1/tracking/sessions/:sessionId/locations` (punto individual)
+- `POST /api/v1/tracking/sessions/:sessionId/locations/batch` (sync offline)
+- `POST /api/v1/tracking/sessions/:sessionId/stop`
 - `POST /api/v1/order-events`
 - `GET /api/v1/order-events/orders/:orderId`
 - `GET /api/v1/eta/orders/:orderId`
@@ -149,7 +157,11 @@ Soporte:
 - `POST /api/v1/attachments`
 - `GET /api/v1/notifications/me`
 - `POST /api/v1/notifications`
-- `PATCH /api/v1/notifications/:id/read`
+- `POST /api/v1/notifications/test` (enviar push de prueba)
+- `PATCH /api/v1/notifications/:id/read` (con verificacion de propiedad)
+- `POST /api/v1/devices` (registrar token FCM del dispositivo)
+- `GET /api/v1/devices/me`
+- `DELETE /api/v1/devices/:token`
 - `GET /api/v1/incidents`
 - `POST /api/v1/incidents`
 - `PATCH /api/v1/incidents/:id/status`
@@ -199,6 +211,15 @@ Administracion:
 
 El perfil de cliente es separado del registro para permitir onboarding progresivo.
 
+## Integracion TMS, mapa en vivo y pagos
+
+- El TMS (`transport-portal`) usa `Authorization: Bearer <accessToken>` contra `/api/v1`.
+- `POST /api/v1/orders/tms` permite que `ADMIN` y `OPERATOR` creen ordenes desde la torre de control.
+- Socket.IO queda publicado en `/socket.io`; los clientes deben enviar el access token en `auth.token`.
+- Eventos principales: `tracking:join-order`, `tracking:leave-order`, `tracking:driver-location`, `tracking:location`, `tracking:trip-started`, `tracking:trip-ended`.
+- CardNet es el provider por defecto con `PAYMENT_PROVIDER=cardnet`; Azul queda disponible con `PAYMENT_PROVIDER=azul` o por request usando `provider`.
+- Los webhooks de pagos quedan en `/api/v1/webhooks/cardnet` y `/api/v1/webhooks/azul`.
+
 ## Respuestas
 
 Las respuestas exitosas usan el envelope global:
@@ -231,10 +252,109 @@ Los errores usan:
 }
 ```
 
+## App del conductor (transport-driver)
+
+La app movil `transport-driver` consume esta API para login, ordenes asignadas,
+ruta con Google Maps, tracking GPS en vivo y notificaciones push.
+
+### Variables de entorno nuevas
+
+```env
+# Google Routes API (server-side ONLY — nunca en el movil)
+GOOGLE_MAPS_SERVER_API_KEY=
+GOOGLE_ROUTES_API_BASE_URL=https://routes.googleapis.com
+GOOGLE_ROUTES_TIMEOUT_MS=10000
+
+# Ajuste de ingesta GPS
+GPS_MAX_ACCURACY_M=100
+GPS_MAX_SPEED_MPS=70
+TRACKING_MAX_BATCH=500
+
+# Firebase Cloud Messaging (FCM HTTP v1, server-side ONLY)
+FIREBASE_PROJECT_ID=
+FIREBASE_CLIENT_EMAIL=
+FIREBASE_PRIVATE_KEY=            # newlines escapados como \n
+# GOOGLE_APPLICATION_CREDENTIALS=/ruta/service-account.json  (alternativa)
+
+# Redis / BullMQ (cola de push). Sin REDIS_URL => entrega inline (sin Redis).
+# REDIS_URL=redis://127.0.0.1:6379
+NOTIFICATIONS_QUEUE_DRIVER=inline   # o "bullmq"
+```
+
+### Google Cloud
+
+Habilita **Routes API** (y **Geocoding API** si se usa) en el proyecto. La clave
+`GOOGLE_MAPS_SERVER_API_KEY` se restringe por **IP del servidor** y a esas APIs.
+Los SDK de mapas (Android/iOS) usan claves distintas restringidas por app,
+configuradas en la app movil — no aqui.
+
+### Firebase
+
+Crea un service account con permiso de FCM y coloca sus credenciales en las
+variables `FIREBASE_*` (o apunta `GOOGLE_APPLICATION_CREDENTIALS` a un JSON).
+**Nunca** subas el service account al repositorio. Si no hay credenciales, el
+push queda deshabilitado y las notificaciones solo se persisten + emiten por
+WebSocket (degradacion controlada).
+
+### Cola de push (BullMQ + Redis)
+
+Con `NOTIFICATIONS_QUEUE_DRIVER=bullmq` (o `REDIS_URL` definido) la entrega usa
+BullMQ con reintentos exponenciales. Levanta Redis, por ejemplo:
+
+```bash
+docker run -p 6379:6379 redis:7-alpine
+```
+
+Sin Redis, el dispatcher entrega inline con reintento best-effort.
+
+### Migraciones
+
+La feature agrega la migracion `20260720200000_driver_tracking_devices`
+(no destructiva): modelo `DeviceToken`, campos de tracking en `DriverLocation`
+(`sessionId`, `sequence`, `clientId` idempotente, `heading`, `altitude`,
+`isMocked`, `vehicleId`), estado/indices en `Notification`, indices de tracking
+y precision `Decimal(9,6)` en coordenadas.
+
+```bash
+pnpm run db:deploy     # aplica migraciones (produccion/CI)
+pnpm run db:migrate    # crea/aplica en desarrollo
+```
+
+### Eventos WebSocket (ampliados)
+
+- Salas autorizadas: `user:{userId}`, `driver:{driverId}`, `order:{orderId}`,
+  `vehicle:{vehicleId}`, `tracking:operations`. El join a `order:` se autoriza
+  por rol/propiedad; el handshake valida el JWT.
+- Eventos: `tracking:location.updated`, `tracking:started`, `tracking:stopped`,
+  `tracking:location.batch-processed`, `order.status.changed`,
+  `notification.created` (+ legacy `tracking:location`).
+
+### Seguridad del tracking
+
+`driverId`/`vehicleId`/`orderId` se derivan de la sesion autenticada, no del
+cliente. Se valida rol de conductor, perfil activo, asignacion a la orden y
+rango de coordenadas; los puntos anomalos (baja precision, saltos imposibles) se
+**registran** para revision sin descartarse silenciosamente. La idempotencia por
+`(sessionId, clientId)` evita duplicados en reintentos/batch.
+
+### Probar tracking con ubicacion simulada
+
+Simula ubicaciones en el emulador (Android: *Extended controls → Location*; iOS:
+*Features → Location*). Verifica con `GET /tracking/sessions/active` y
+`GET /locations/orders/:orderId`. El Portal TMS observa el vehiculo por el room
+`order:{orderId}` / `tracking:operations`.
+
+### Enviar una notificacion de prueba
+
+Con un token ADMIN/OPERATOR: `POST /api/v1/notifications/test` con
+`{ "userId": "<conductor>" }`, o el propio conductor sin body. Requiere Firebase
+configurado y un development build en el dispositivo.
+
 ## Verificacion
 
 ```bash
-pnpm exec tsc --noEmit --incremental false --pretty false
-pnpm exec eslint "{src,test}/**/*.ts"
-pnpm run test:e2e
+pnpm exec tsc --noEmit
+pnpm run lint
+pnpm run test
+pnpm run build
 ```

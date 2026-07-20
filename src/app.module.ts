@@ -20,6 +20,7 @@ import { AdministrationModule } from './modules/administration/administration.mo
 import { BillingModule } from './modules/billing/billing.module';
 import { IdentityModule } from './modules/identity/identity.module';
 import { OperationsModule } from './modules/operations/operations.module';
+import { RealtimeModule } from './modules/realtime/realtime.module';
 import { SupportModule } from './modules/support/support.module';
 import { TrackingModule } from './modules/tracking/tracking.module';
 import { TransportModule } from './modules/transport/transport.module';
@@ -76,6 +77,7 @@ import { TransportModule } from './modules/transport/transport.module';
     IdentityModule,
     TransportModule,
     OperationsModule,
+    RealtimeModule,
     TrackingModule,
     BillingModule,
     SupportModule,

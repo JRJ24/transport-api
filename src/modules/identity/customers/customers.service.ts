@@ -20,6 +20,13 @@ import type { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto
 export class CustomersService {
   constructor(private readonly prisma: PrismaService) {}
 
+  list(): Promise<CustomerProfile[]> {
+    return this.prisma.customerProfile.findMany({
+      include: { user: true, customerAddresses: true },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
   async getMyProfile(userId: string): Promise<CustomerProfile> {
     return this.getProfileOrThrow(userId);
   }

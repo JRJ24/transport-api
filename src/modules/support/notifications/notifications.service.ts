@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import type { Notification, Prisma } from '@generated/prisma/client';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateNotificationDto } from './dto/create-notification.dto';
 
@@ -26,7 +27,17 @@ export class NotificationsService {
     });
   }
 
-  markRead(id: string): Promise<Notification> {
+  async markRead(id: string, userId: string): Promise<Notification> {
+    const notification = await this.prisma.notification.findUnique({
+      where: { id },
+    });
+    if (!notification || notification.userId !== userId) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'You cannot modify this notification',
+      });
+    }
+
     return this.prisma.notification.update({
       where: { id },
       data: { readAt: new Date() },

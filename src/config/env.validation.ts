@@ -29,6 +29,55 @@ export const envSchema = z.object({
 
   THROTTLE_TTL_MS: z.coerce.number().int().positive().default(60_000),
   THROTTLE_LIMIT: z.coerce.number().int().positive().default(100),
+
+  GPS_MAX_ACCURACY_M: z.coerce.number().positive().default(100),
+  GPS_MAX_SPEED_MPS: z.coerce.number().positive().default(70),
+  TRACKING_MAX_BATCH: z.coerce.number().int().positive().default(500),
+
+  GOOGLE_MAPS_API_KEY: z.string().optional(),
+  GOOGLE_MAPS_SERVER_API_KEY: z.string().optional(),
+  GOOGLE_ROUTES_API_BASE_URL: z
+    .string()
+    .url()
+    .default('https://routes.googleapis.com'),
+  GOOGLE_ROUTES_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  PAYMENT_PROVIDER: z
+    .enum([
+      'cardnet',
+      'azul',
+      'internal-mock',
+      'CARDNET',
+      'AZUL',
+      'INTERNAL-MOCK',
+    ])
+    .default('cardnet'),
+  PAYMENT_CALLBACK_BASE_URL: z.string().optional(),
+  CARDNET_ENVIRONMENT: z.enum(['sandbox', 'production']).default('sandbox'),
+  CARDNET_MERCHANT_ID: z.string().optional(),
+  CARDNET_TERMINAL_ID: z.string().optional(),
+  CARDNET_API_URL: z.string().optional(),
+  CARDNET_API_KEY: z.string().optional(),
+  CARDNET_SECRET_KEY: z.string().optional(),
+  CARDNET_WEBHOOK_SECRET: z.string().optional(),
+  AZUL_ENVIRONMENT: z.enum(['sandbox', 'production']).default('sandbox'),
+  AZUL_MERCHANT_ID: z.string().optional(),
+  AZUL_API_URL: z.string().optional(),
+  AZUL_API_KEY: z.string().optional(),
+  AZUL_SECRET_KEY: z.string().optional(),
+  AZUL_WEBHOOK_SECRET: z.string().optional(),
+
+  // ── Firebase Cloud Messaging (server-side only) ──────────────────────────
+  FCM_PROJECT_ID: z.string().optional(),
+  FIREBASE_PROJECT_ID: z.string().optional(),
+  FIREBASE_CLIENT_EMAIL: z.string().optional(),
+  FIREBASE_PRIVATE_KEY: z.string().optional(),
+  GOOGLE_APPLICATION_CREDENTIALS: z.string().optional(),
+
+  // ── Redis / BullMQ (push delivery queue) ─────────────────────────────────
+  REDIS_URL: z.string().optional(),
+  REDIS_HOST: z.string().default('127.0.0.1'),
+  REDIS_PORT: z.coerce.number().int().positive().default(6379),
+  NOTIFICATIONS_QUEUE_DRIVER: z.enum(['bullmq', 'inline']).optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

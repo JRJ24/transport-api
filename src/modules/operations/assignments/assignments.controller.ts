@@ -29,6 +29,13 @@ export class AssignmentsController {
     return this.service.list();
   }
 
+  @ApiOperation({ summary: 'List assignments for the authenticated driver' })
+  @Roles(ROLES.DRIVER)
+  @Get('me')
+  listMine(@CurrentUser() user: AuthenticatedUser): Promise<OrderAssignment[]> {
+    return this.service.listMine(user);
+  }
+
   @ApiOperation({ summary: 'Create an order assignment' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR)
   @Post()

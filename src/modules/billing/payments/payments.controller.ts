@@ -13,7 +13,7 @@ import { ROLES } from '@generated/prisma/enums';
 import { Roles } from '@/common/decorators/roles.decorator';
 import { CreatePaymentDto } from './dto/create-payment.dto';
 import { UpdatePaymentStatusDto } from './dto/update-payment-status.dto';
-import { PaymentsService } from './payments.service';
+import { PaymentsService, type CreatePaymentResult } from './payments.service';
 
 @ApiTags('payments')
 @ApiBearerAuth()
@@ -28,10 +28,10 @@ export class PaymentsController {
     return this.service.list();
   }
 
-  @ApiOperation({ summary: 'Create internal/mock payment' })
+  @ApiOperation({ summary: 'Create payment and initialize provider checkout' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
   @Post()
-  create(@Body() dto: CreatePaymentDto): Promise<Payment> {
+  create(@Body() dto: CreatePaymentDto): Promise<CreatePaymentResult> {
     return this.service.create(dto);
   }
 

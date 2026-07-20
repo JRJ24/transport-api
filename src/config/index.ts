@@ -5,6 +5,8 @@ import { mapsConfig } from './maps.config';
 import { notificationConfig } from './notification.config';
 import { paymentConfig } from './payment.config';
 import { storageConfig } from './storage.config';
+import { trackingConfig } from './tracking.config';
+import { googleMapsConfig } from '@/integrations/google-maps/google-maps.config';
 
 export * from './app.config';
 export * from './auth.config';
@@ -14,6 +16,7 @@ export * from './maps.config';
 export * from './notification.config';
 export * from './payment.config';
 export * from './storage.config';
+export * from './tracking.config';
 
 export const configLoaders = [
   appConfig,
@@ -23,4 +26,6 @@ export const configLoaders = [
   notificationConfig,
   paymentConfig,
   storageConfig,
+  trackingConfig,
+  googleMapsConfig,
 ];

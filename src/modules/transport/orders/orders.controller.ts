@@ -9,13 +9,14 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { TransportOrder } from '@generated/prisma/client';
+import type { OrderAssignment, TransportOrder } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
+import { CreateTmsOrderDto } from './dto/create-tms-order.dto';
 import { OrderQueryDto } from './dto/order-query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { OrdersService } from './orders.service';
@@ -36,6 +37,16 @@ export class OrdersController {
     return this.service.create(user, dto);
   }
 
+  @ApiOperation({ summary: 'Create an order from the TMS control tower' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Post('tms')
+  createFromTms(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateTmsOrderDto,
+  ): Promise<TransportOrder> {
+    return this.service.createFromTms(user, dto);
+  }
+
   @ApiOperation({ summary: 'List orders for actor' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get()
@@ -54,6 +65,16 @@ export class OrdersController {
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<TransportOrder | null> {
     return this.service.findOne(user, id);
+  }
+
+  @ApiOperation({ summary: 'Accept an assigned order (driver alias)' })
+  @Roles(ROLES.DRIVER)
+  @Post(':id/accept')
+  accept(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<OrderAssignment> {
+    return this.service.accept(user, id);
   }
 
   @ApiOperation({ summary: 'Update order status' })

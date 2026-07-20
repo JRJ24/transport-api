@@ -2,9 +2,11 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsEnum,
+  IsIn,
   IsNumber,
   IsOptional,
   IsString,
+  IsUrl,
   IsUUID,
   Min,
 } from 'class-validator';
@@ -30,4 +32,23 @@ export class CreatePaymentDto {
   @IsOptional()
   @IsString()
   currency?: string;
+
+  @ApiPropertyOptional({ enum: ['cardnet', 'azul', 'internal-mock'] })
+  @IsOptional()
+  @IsIn(['cardnet', 'azul', 'internal-mock'])
+  provider?: string;
+
+  @ApiPropertyOptional({
+    example: 'https://portal.rutard.local/payments/success',
+  })
+  @IsOptional()
+  @IsUrl({ require_tld: false })
+  returnUrl?: string;
+
+  @ApiPropertyOptional({
+    example: 'https://portal.rutard.local/payments/cancel',
+  })
+  @IsOptional()
+  @IsUrl({ require_tld: false })
+  cancelUrl?: string;
 }

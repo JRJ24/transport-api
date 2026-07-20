@@ -17,10 +17,14 @@
     "db:deploy": "prisma migrate deploy",
     "db:generate": "prisma generate",
     "db:studio": "prisma studio",
-    "db:seed": "tsx prisma/seed.ts"
+    "db:seed": "tsx prisma/seed.ts",
+    "db:seed:driver": "tsx prisma/seed-driver.ts",
+    "lint": "eslint src",
+    "test": "jest"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1086.0",
+    "@nestjs/bullmq": "^11.0.4",
     "@nestjs/common": "^11.0.1",
     "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
@@ -33,10 +37,12 @@
     "@prisma/client": "^7.8.0",
     "axios": "^1.18.1",
     "bcrypt": "^6.0.0",
+    "bullmq": "^5.80.9",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.15.1",
     "dayjs": "^1.11.21",
     "dotenv": "^17.4.2",
+    "firebase-admin": "^14.2.0",
     "helmet": "^8.3.0",
     "multer": "^2.2.0",
     "nestjs-pino": "^4.6.1",
@@ -103,7 +109,8 @@
     },
     "moduleNameMapper": {
       "^@/(.*)$": "<rootDir>/$1",
-      "^@generated/(.*)$": "<rootDir>/../generated/$1"
+      "^@generated/(.*)$": "<rootDir>/generated/$1",
+      "^(\\.{1,2}/.*)\\.js$": "$1"
     },
     "collectCoverageFrom": [
       "**/*.(t|j)s"

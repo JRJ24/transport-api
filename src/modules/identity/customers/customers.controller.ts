@@ -34,6 +34,13 @@ import {
 export class CustomersController {
   constructor(private readonly customersService: CustomersService) {}
 
+  @ApiOperation({ summary: 'List customer profiles for TMS' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Get()
+  list(): Promise<unknown[]> {
+    return this.customersService.list();
+  }
+
   @ApiOperation({ summary: 'Get my customer profile' })
   @Get('me')
   async getMyProfile(

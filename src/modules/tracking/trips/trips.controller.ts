@@ -10,7 +10,9 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { TrackingSession } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
+import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
+import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { StartTripDto } from './dto/start-trip.dto';
 import { TripsService } from './trips.service';
 
@@ -23,15 +25,21 @@ export class TripsController {
   @ApiOperation({ summary: 'Start a tracking trip' })
   @Roles(ROLES.DRIVER, ROLES.ADMIN, ROLES.OPERATOR)
   @Post('start')
-  start(@Body() dto: StartTripDto): Promise<TrackingSession> {
-    return this.service.start(dto);
+  start(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: StartTripDto,
+  ): Promise<TrackingSession> {
+    return this.service.start(user, dto);
   }
 
   @ApiOperation({ summary: 'End a tracking trip' })
   @Roles(ROLES.DRIVER, ROLES.ADMIN, ROLES.OPERATOR)
   @Patch(':id/end')
-  end(@Param('id', ParseUUIDPipe) id: string): Promise<TrackingSession> {
-    return this.service.end(id);
+  end(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<TrackingSession> {
+    return this.service.end(user, id);
   }
 
   @ApiOperation({ summary: 'List tracking trips by order' })
