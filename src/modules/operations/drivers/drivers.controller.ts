@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { DriverProfile } from '@generated/prisma/client';
@@ -14,6 +15,7 @@ import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CreateDriverDto } from './dto/create-driver.dto';
+import { DriverQueryDto } from './dto/driver-query.dto';
 import { UpdateDriverStatusDto } from './dto/update-driver-status.dto';
 import { UpdateDriverVerificationDto } from './dto/update-driver-verification.dto';
 import { DriversService } from './drivers.service';
@@ -27,8 +29,8 @@ export class DriversController {
   @ApiOperation({ summary: 'List drivers' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR)
   @Get()
-  list(): Promise<DriverProfile[]> {
-    return this.service.list();
+  list(@Query() query: DriverQueryDto): Promise<DriverProfile[]> {
+    return this.service.list(query);
   }
 
   @ApiOperation({ summary: 'Get my driver profile' })

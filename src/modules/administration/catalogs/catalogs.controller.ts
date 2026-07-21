@@ -12,6 +12,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Catalog } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import { Roles } from '@/common/decorators/roles.decorator';
+import { CatalogQueryDto } from './dto/catalog-query.dto';
 import { CatalogsService } from './catalogs.service';
 import { CreateCatalogDto } from './dto/create-catalog.dto';
 import { UpdateCatalogDto } from './dto/update-catalog.dto';
@@ -25,8 +26,8 @@ export class CatalogsController {
 
   @ApiOperation({ summary: 'List catalogs' })
   @Get()
-  list(@Query('groupKey') groupKey?: string): Promise<Catalog[]> {
-    return this.service.list(groupKey);
+  list(@Query() query: CatalogQueryDto): Promise<Catalog[]> {
+    return this.service.list(query);
   }
 
   @ApiOperation({ summary: 'Create catalog item' })

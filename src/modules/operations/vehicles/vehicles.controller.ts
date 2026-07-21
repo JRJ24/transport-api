@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Vehicle, VehicleDocument } from '@generated/prisma/client';
@@ -14,6 +15,7 @@ import { Roles } from '@/common/decorators/roles.decorator';
 import { CreateVehicleDocumentDto } from './dto/create-vehicle-document.dto';
 import { CreateVehicleDto } from './dto/create-vehicle.dto';
 import { UpdateVehicleDto } from './dto/update-vehicle.dto';
+import { VehicleQueryDto } from './dto/vehicle-query.dto';
 import { VehiclesService } from './vehicles.service';
 
 @ApiTags('vehicles')
@@ -25,8 +27,8 @@ export class VehiclesController {
 
   @ApiOperation({ summary: 'List vehicles' })
   @Get()
-  list(): Promise<Vehicle[]> {
-    return this.service.list();
+  list(@Query() query: VehicleQueryDto): Promise<Vehicle[]> {
+    return this.service.list(query);
   }
 
   @ApiOperation({ summary: 'Create a vehicle' })

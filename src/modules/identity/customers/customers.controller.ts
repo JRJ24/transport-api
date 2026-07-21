@@ -9,6 +9,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ROLES } from '@generated/prisma/enums';
@@ -18,6 +19,7 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { CustomersService } from './customers.service';
 import { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
+import { CustomerQueryDto } from './dto/customer-query.dto';
 import { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
 import { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
 import {
@@ -37,8 +39,8 @@ export class CustomersController {
   @ApiOperation({ summary: 'List customer profiles for TMS' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR)
   @Get()
-  list(): Promise<unknown[]> {
-    return this.customersService.list();
+  list(@Query() query: CustomerQueryDto): Promise<unknown[]> {
+    return this.customersService.list(query);
   }
 
   @ApiOperation({ summary: 'Get my customer profile' })

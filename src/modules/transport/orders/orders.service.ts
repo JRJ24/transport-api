@@ -325,7 +325,75 @@ export class OrdersService {
   ): Promise<TransportOrder[]> {
     const where: Prisma.TransportOrderWhereInput = {
       ...(query.status && { status: query.status }),
+      ...(query.serviceType && { serviceType: query.serviceType }),
+      ...(query.customerId && { customerId: query.customerId }),
+      ...(query.vehicleCategoryId && {
+        vehicleCategoryId: query.vehicleCategoryId,
+      }),
+      ...(query.driverId && {
+        orderAssignments: { some: { driverId: query.driverId } },
+      }),
+      ...((query.from || query.to) && {
+        createdAt: {
+          ...(query.from && { gte: query.from }),
+          ...(query.to && { lte: query.to }),
+        },
+      }),
     };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { orderCode: { contains: search, mode: 'insensitive' } },
+        { notes: { contains: search, mode: 'insensitive' } },
+        {
+          customer: {
+            is: {
+              OR: [
+                { companyName: { contains: search, mode: 'insensitive' } },
+                {
+                  user: {
+                    is: {
+                      OR: [
+                        { fullName: { contains: search, mode: 'insensitive' } },
+                        { email: { contains: search, mode: 'insensitive' } },
+                      ],
+                    },
+                  },
+                },
+              ],
+            },
+          },
+        },
+        {
+          orderStops: {
+            some: {
+              OR: [
+                { addressLine: { contains: search, mode: 'insensitive' } },
+                { city: { contains: search, mode: 'insensitive' } },
+                { province: { contains: search, mode: 'insensitive' } },
+                { contactName: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+        {
+          orderAssignments: {
+            some: {
+              driver: {
+                is: {
+                  user: {
+                    is: {
+                      fullName: { contains: search, mode: 'insensitive' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      ];
+    }
 
     if (this.isCustomerOnly(user)) {
       const customer = await this.getCustomerProfile(user.id);

@@ -15,6 +15,7 @@ import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { DeliveryProofsService } from './delivery-proofs.service';
+import { DeliveryProofQueryDto } from './dto/delivery-proof-query.dto';
 import { CreateDeliveryProofDto } from './dto/create-delivery-proof.dto';
 import { CreateSignatureDto } from './dto/create-signature.dto';
 import { ValidateDeliveryProofDto } from './dto/validate-delivery-proof.dto';
@@ -28,8 +29,8 @@ export class DeliveryProofsController {
   @ApiOperation({ summary: 'List delivery proofs' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get()
-  list(@Query('orderId') orderId?: string): Promise<DeliveryProof[]> {
-    return this.service.list(orderId);
+  list(@Query() query: DeliveryProofQueryDto): Promise<DeliveryProof[]> {
+    return this.service.list(query);
   }
 
   @ApiOperation({ summary: 'Capture delivery proof' })

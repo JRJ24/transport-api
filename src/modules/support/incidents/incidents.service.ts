@@ -1,20 +1,55 @@
 import { Injectable } from '@nestjs/common';
-import type { Incident, IncidentComment } from '@generated/prisma/client';
+import type {
+  Incident,
+  IncidentComment,
+  Prisma,
+} from '@generated/prisma/client';
 import { INCIDENT_STATUS } from '@generated/prisma/enums';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateIncidentCommentDto } from './dto/create-incident-comment.dto';
 import type { CreateIncidentDto } from './dto/create-incident.dto';
+import type { IncidentQueryDto } from './dto/incident-query.dto';
 import type { UpdateIncidentStatusDto } from './dto/update-incident-status.dto';
 
 @Injectable()
 export class IncidentsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(orderId?: string): Promise<Incident[]> {
+  list(query: IncidentQueryDto): Promise<Incident[]> {
+    const where: Prisma.IncidentWhereInput = {
+      ...(query.orderId && { orderId: query.orderId }),
+      ...(query.incidentType && { incidentType: query.incidentType }),
+      ...(query.severity && { severity: query.severity }),
+      ...(query.status && { status: query.status }),
+      ...((query.from || query.to) && {
+        reportedAt: {
+          ...(query.from && { gte: query.from }),
+          ...(query.to && { lte: query.to }),
+        },
+      }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { title: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+        {
+          order: {
+            is: { orderCode: { contains: search, mode: 'insensitive' } },
+          },
+        },
+      ];
+    }
+
     return this.prisma.incident.findMany({
-      where: { ...(orderId && { orderId }) },
-      include: { incidentsComments: true },
+      where,
+      include: {
+        incidentsComments: true,
+        order: { select: { id: true, orderCode: true, status: true } },
+        user: { select: { id: true, fullName: true, email: true } },
+      },
       orderBy: { reportedAt: 'desc' },
     });
   }

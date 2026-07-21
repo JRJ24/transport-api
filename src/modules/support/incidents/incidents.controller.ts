@@ -16,6 +16,7 @@ import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CreateIncidentCommentDto } from './dto/create-incident-comment.dto';
 import { CreateIncidentDto } from './dto/create-incident.dto';
+import { IncidentQueryDto } from './dto/incident-query.dto';
 import { UpdateIncidentStatusDto } from './dto/update-incident-status.dto';
 import { IncidentsService } from './incidents.service';
 
@@ -28,8 +29,8 @@ export class IncidentsController {
   @ApiOperation({ summary: 'List incidents' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get()
-  list(@Query('orderId') orderId?: string): Promise<Incident[]> {
-    return this.service.list(orderId);
+  list(@Query() query: IncidentQueryDto): Promise<Incident[]> {
+    return this.service.list(query);
   }
 
   @ApiOperation({ summary: 'Create incident' })

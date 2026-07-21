@@ -1,8 +1,13 @@
 import { Injectable } from '@nestjs/common';
-import type { DeliveryProof, Signature } from '@generated/prisma/client';
+import type {
+  DeliveryProof,
+  Prisma,
+  Signature,
+} from '@generated/prisma/client';
 import { VALIDATION } from '@generated/prisma/enums';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
+import type { DeliveryProofQueryDto } from './dto/delivery-proof-query.dto';
 import type { CreateDeliveryProofDto } from './dto/create-delivery-proof.dto';
 import type { CreateSignatureDto } from './dto/create-signature.dto';
 import type { ValidateDeliveryProofDto } from './dto/validate-delivery-proof.dto';
@@ -11,10 +16,42 @@ import type { ValidateDeliveryProofDto } from './dto/validate-delivery-proof.dto
 export class DeliveryProofsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(orderId?: string): Promise<DeliveryProof[]> {
+  list(query: DeliveryProofQueryDto): Promise<DeliveryProof[]> {
+    const where: Prisma.DeliveryProofWhereInput = {
+      ...(query.orderId && { orderId: query.orderId }),
+      ...(query.proofType && { proofType: query.proofType }),
+      ...(query.validationStatus && {
+        validationStatus: query.validationStatus,
+      }),
+      ...((query.from || query.to) && {
+        capturedAt: {
+          ...(query.from && { gte: query.from }),
+          ...(query.to && { lte: query.to }),
+        },
+      }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { recipientName: { contains: search, mode: 'insensitive' } },
+        { recipientDocument: { contains: search, mode: 'insensitive' } },
+        { notes: { contains: search, mode: 'insensitive' } },
+        {
+          order: {
+            is: { orderCode: { contains: search, mode: 'insensitive' } },
+          },
+        },
+      ];
+    }
+
     return this.prisma.deliveryProof.findMany({
-      where: { ...(orderId && { orderId }) },
-      include: { signatures: true },
+      where,
+      include: {
+        signatures: true,
+        order: { select: { id: true, orderCode: true, status: true } },
+        driver: { select: { id: true, fullName: true, email: true } },
+      },
       orderBy: { capturedAt: 'desc' },
     });
   }

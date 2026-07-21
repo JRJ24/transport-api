@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import type { DriverProfile } from '@generated/prisma/client';
+import type { DriverProfile, Prisma } from '@generated/prisma/client';
 import { STATUS_DRIVER, VERIFICATION_STATUS } from '@generated/prisma/enums';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateDriverDto } from './dto/create-driver.dto';
+import type { DriverQueryDto } from './dto/driver-query.dto';
 import type { UpdateDriverStatusDto } from './dto/update-driver-status.dto';
 import type { UpdateDriverVerificationDto } from './dto/update-driver-verification.dto';
 
@@ -10,8 +11,36 @@ import type { UpdateDriverVerificationDto } from './dto/update-driver-verificati
 export class DriversService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(): Promise<DriverProfile[]> {
+  list(query: DriverQueryDto): Promise<DriverProfile[]> {
+    const where: Prisma.DriverProfileWhereInput = {
+      ...(query.availabilityStatus && {
+        availabilityStatus: query.availabilityStatus,
+      }),
+      ...(query.verificationStatus && {
+        verificationStatus: query.verificationStatus,
+      }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { licenseNumber: { contains: search, mode: 'insensitive' } },
+        {
+          user: {
+            is: {
+              OR: [
+                { fullName: { contains: search, mode: 'insensitive' } },
+                { email: { contains: search, mode: 'insensitive' } },
+                { phone: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+      ];
+    }
+
     return this.prisma.driverProfile.findMany({
+      where,
       include: { user: true },
       orderBy: { createdAt: 'desc' },
     });

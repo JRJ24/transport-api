@@ -7,12 +7,14 @@ import {
 import type {
   CustomerAddress,
   CustomerProfile,
+  Prisma,
 } from '@generated/prisma/client';
 import { TYPE_CUSTOMER } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import type { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
+import type { CustomerQueryDto } from './dto/customer-query.dto';
 import type { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
 import type { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
 
@@ -20,9 +22,50 @@ import type { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto
 export class CustomersService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(): Promise<CustomerProfile[]> {
+  list(query: CustomerQueryDto): Promise<CustomerProfile[]> {
+    const where: Prisma.CustomerProfileWhereInput = {
+      ...(query.customerType && { customerType: query.customerType }),
+      ...(query.status && { user: { is: { status: query.status } } }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { companyName: { contains: search, mode: 'insensitive' } },
+        { documentNumber: { contains: search, mode: 'insensitive' } },
+        { billingEmail: { contains: search, mode: 'insensitive' } },
+        {
+          user: {
+            is: {
+              OR: [
+                { fullName: { contains: search, mode: 'insensitive' } },
+                { email: { contains: search, mode: 'insensitive' } },
+                { phone: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+        {
+          customerAddresses: {
+            some: {
+              OR: [
+                { addressesLine: { contains: search, mode: 'insensitive' } },
+                { city: { contains: search, mode: 'insensitive' } },
+                { province: { contains: search, mode: 'insensitive' } },
+              ],
+            },
+          },
+        },
+      ];
+    }
+
     return this.prisma.customerProfile.findMany({
-      include: { user: true, customerAddresses: true },
+      where,
+      include: {
+        user: true,
+        customerAddresses: true,
+        transportOrders: { select: { id: true, status: true } },
+      },
       orderBy: { createdAt: 'desc' },
     });
   }

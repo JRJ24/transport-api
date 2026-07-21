@@ -6,6 +6,7 @@ import {
   ParseUUIDPipe,
   Patch,
   Post,
+  Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { PriceQuote, RateCard, RateRule } from '@generated/prisma/client';
@@ -16,6 +17,7 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { CreatePriceQuoteDto } from './dto/create-price-quote.dto';
 import { CreateRateCardDto } from './dto/create-rate-card.dto';
 import { CreateRateRuleDto } from './dto/create-rate-rule.dto';
+import { RateCardQueryDto } from './dto/rate-card-query.dto';
 import { UpdateRateCardDto } from './dto/update-rate-card.dto';
 import { PricingService } from './pricing.service';
 
@@ -28,8 +30,8 @@ export class PricingController {
   @ApiOperation({ summary: 'List rate cards' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR)
   @Get('rate-cards')
-  listRateCards(): Promise<RateCard[]> {
-    return this.service.listRateCards();
+  listRateCards(@Query() query: RateCardQueryDto): Promise<RateCard[]> {
+    return this.service.listRateCards(query);
   }
 
   @ApiOperation({ summary: 'Create a rate card' })

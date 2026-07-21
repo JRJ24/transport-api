@@ -1,11 +1,17 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
-import type { PriceQuote, RateCard, RateRule } from '@generated/prisma/client';
+import type {
+  PriceQuote,
+  Prisma,
+  RateCard,
+  RateRule,
+} from '@generated/prisma/client';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreatePriceQuoteDto } from './dto/create-price-quote.dto';
 import type { CreateRateCardDto } from './dto/create-rate-card.dto';
 import type { CreateRateRuleDto } from './dto/create-rate-rule.dto';
+import type { RateCardQueryDto } from './dto/rate-card-query.dto';
 import type { UpdateRateCardDto } from './dto/update-rate-card.dto';
 
 const TAX_RATE = 0.18;
@@ -15,8 +21,34 @@ const QUOTE_TTL_MS = 15 * 60_000;
 export class PricingService {
   constructor(private readonly prisma: PrismaService) {}
 
-  listRateCards(): Promise<RateCard[]> {
-    return this.prisma.rateCard.findMany({ orderBy: { createdAt: 'desc' } });
+  listRateCards(query: RateCardQueryDto): Promise<RateCard[]> {
+    const where: Prisma.RateCardWhereInput = {
+      ...(query.isActive !== undefined && {
+        isActive: query.isActive === 'true',
+      }),
+      ...((query.from || query.to) && {
+        AND: [
+          ...(query.to ? [{ validForm: { lte: query.to } }] : []),
+          ...(query.from
+            ? [{ OR: [{ validTo: null }, { validTo: { gte: query.from } }] }]
+            : []),
+        ],
+      }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { name: { contains: search, mode: 'insensitive' } },
+        { description: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
+    return this.prisma.rateCard.findMany({
+      where,
+      include: { rateRules: { orderBy: { createdAt: 'desc' } } },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   createRateCard(dto: CreateRateCardDto): Promise<RateCard> {

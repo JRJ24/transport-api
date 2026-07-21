@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
-import type { Catalog } from '@generated/prisma/client';
+import type { Catalog, Prisma } from '@generated/prisma/client';
 import { PrismaService } from '@/database/prisma.service';
+import type { CatalogQueryDto } from './dto/catalog-query.dto';
 import type { CreateCatalogDto } from './dto/create-catalog.dto';
 import type { UpdateCatalogDto } from './dto/update-catalog.dto';
 
@@ -8,9 +9,24 @@ import type { UpdateCatalogDto } from './dto/update-catalog.dto';
 export class CatalogsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(groupKey?: string): Promise<Catalog[]> {
+  list(query: CatalogQueryDto): Promise<Catalog[]> {
+    const where: Prisma.CatalogWhereInput = {
+      ...(query.groupKey && { groupKey: query.groupKey }),
+      ...(query.isActive !== undefined && {
+        isActive: query.isActive === 'true',
+      }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { code: { contains: search, mode: 'insensitive' } },
+        { label: { contains: search, mode: 'insensitive' } },
+      ];
+    }
+
     return this.prisma.catalog.findMany({
-      where: { ...(groupKey && { groupKey }) },
+      where,
       orderBy: [{ groupKey: 'asc' }, { sortOrder: 'asc' }],
     });
   }

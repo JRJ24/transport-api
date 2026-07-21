@@ -1,16 +1,64 @@
 import { Injectable } from '@nestjs/common';
-import type { Reservation } from '@generated/prisma/client';
+import type { Prisma, Reservation } from '@generated/prisma/client';
 import { RESERVATIONS_STATUS } from '@generated/prisma/enums';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateReservationDto } from './dto/create-reservation.dto';
+import type { ReservationQueryDto } from './dto/reservation-query.dto';
 import type { RescheduleReservationDto } from './dto/reschedule-reservation.dto';
 
 @Injectable()
 export class ReservationsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(): Promise<Reservation[]> {
+  list(query: ReservationQueryDto): Promise<Reservation[]> {
+    const where: Prisma.ReservationWhereInput = {
+      ...(query.orderId && { orderId: query.orderId }),
+      ...(query.status && { reservationStatus: query.status }),
+      ...((query.from || query.to) && {
+        reservedFor: {
+          ...(query.from && { gte: query.from }),
+          ...(query.to && { lte: query.to }),
+        },
+      }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.order = {
+        is: {
+          OR: [
+            { orderCode: { contains: search, mode: 'insensitive' } },
+            {
+              customer: {
+                is: {
+                  OR: [
+                    { companyName: { contains: search, mode: 'insensitive' } },
+                    {
+                      user: {
+                        is: {
+                          fullName: { contains: search, mode: 'insensitive' },
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            },
+          ],
+        },
+      };
+    }
+
     return this.prisma.reservation.findMany({
+      where,
+      include: {
+        order: {
+          include: {
+            customer: { include: { user: true } },
+            vehicleCategory: true,
+          },
+        },
+      },
       orderBy: { reservedFor: 'asc' },
     });
   }

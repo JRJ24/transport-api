@@ -1,18 +1,48 @@
 import { Injectable } from '@nestjs/common';
-import type { Vehicle, VehicleDocument } from '@generated/prisma/client';
+import type {
+  Prisma,
+  Vehicle,
+  VehicleDocument,
+} from '@generated/prisma/client';
 import { STATUS_VEHICLE } from '@generated/prisma/enums';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateVehicleDocumentDto } from './dto/create-vehicle-document.dto';
 import type { CreateVehicleDto } from './dto/create-vehicle.dto';
 import type { UpdateVehicleDto } from './dto/update-vehicle.dto';
+import type { VehicleQueryDto } from './dto/vehicle-query.dto';
 
 @Injectable()
 export class VehiclesService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(): Promise<Vehicle[]> {
+  list(query: VehicleQueryDto): Promise<Vehicle[]> {
+    const where: Prisma.VehicleWhereInput = {
+      ...(query.status && { status: query.status }),
+      ...(query.categoryId && { categoryId: query.categoryId }),
+      ...(query.driverId && { driverId: query.driverId }),
+    };
+
+    if (query.search) {
+      const search = query.search.trim();
+      where.OR = [
+        { plateNumber: { contains: search, mode: 'insensitive' } },
+        { brand: { contains: search, mode: 'insensitive' } },
+        { model: { contains: search, mode: 'insensitive' } },
+        { color: { contains: search, mode: 'insensitive' } },
+        {
+          vehicleCategory: {
+            is: { name: { contains: search, mode: 'insensitive' } },
+          },
+        },
+      ];
+    }
+
     return this.prisma.vehicle.findMany({
-      include: { vehicleCategory: true, vehiclesDocuments: true },
+      where,
+      include: {
+        vehicleCategory: true,
+        vehiclesDocuments: true,
+      },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -20,7 +50,10 @@ export class VehiclesService {
   findOne(id: string): Promise<Vehicle | null> {
     return this.prisma.vehicle.findUnique({
       where: { id },
-      include: { vehicleCategory: true, vehiclesDocuments: true },
+      include: {
+        vehicleCategory: true,
+        vehiclesDocuments: true,
+      },
     });
   }
 

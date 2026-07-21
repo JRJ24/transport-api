@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { AuditLog } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import { Roles } from '@/common/decorators/roles.decorator';
+import { AuditQueryDto } from './dto/audit-query.dto';
 import { AuditService } from './audit.service';
 
 @ApiTags('audit')
@@ -14,12 +15,7 @@ export class AuditController {
 
   @ApiOperation({ summary: 'List audit logs' })
   @Get()
-  list(
-    @Query('actorUserId') actorUserId?: string,
-    @Query('entityType') entityType?: string,
-    @Query('entityId') entityId?: string,
-    @Query('action') action?: string,
-  ): Promise<AuditLog[]> {
-    return this.service.list({ actorUserId, entityType, entityId, action });
+  list(@Query() query: AuditQueryDto): Promise<AuditLog[]> {
+    return this.service.list(query);
   }
 }

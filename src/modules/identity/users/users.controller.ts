@@ -1,10 +1,20 @@
-import { Body, Controller, Get, Param, Patch, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  Patch,
+  Post,
+  Query,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ROLES } from '@generated/prisma/enums';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import type { PaginatedResult } from '@/common/interfaces/pagination.interface';
+import { CreateUserDto } from './dto/create-user.dto';
+import { UpdateUserStatusDto } from './dto/update-user-status.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UserQueryDto } from './dto/user-query.dto';
 import { toUserResponse, type UserResponse } from './presenters/user.presenter';
@@ -23,6 +33,13 @@ export class UsersController {
     @Query() query: UserQueryDto,
   ): Promise<PaginatedResult<UserResponse>> {
     return this.usersService.findAll(query);
+  }
+
+  @ApiOperation({ summary: 'Create a TMS user' })
+  @Roles(ROLES.ADMIN)
+  @Post()
+  async create(@Body() dto: CreateUserDto): Promise<UserResponse> {
+    return toUserResponse(await this.usersService.create(dto));
   }
 
   @ApiOperation({ summary: 'Get my profile' })
@@ -45,5 +62,15 @@ export class UsersController {
   @Get(':id')
   async findOne(@Param('id') id: string): Promise<UserResponse> {
     return toUserResponse(await this.usersService.getByIdWithRoles(id));
+  }
+
+  @ApiOperation({ summary: 'Update a user account status' })
+  @Roles(ROLES.ADMIN)
+  @Patch(':id/status')
+  async updateStatus(
+    @Param('id') id: string,
+    @Body() dto: UpdateUserStatusDto,
+  ): Promise<UserResponse> {
+    return toUserResponse(await this.usersService.setStatus(id, dto.status));
   }
 }

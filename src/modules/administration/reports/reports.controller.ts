@@ -1,7 +1,8 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Query } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ROLES } from '@generated/prisma/enums';
 import { Roles } from '@/common/decorators/roles.decorator';
+import { ReportQueryDto } from './dto/report-query.dto';
 import { ReportsService } from './reports.service';
 
 @ApiTags('reports')
@@ -13,13 +14,13 @@ export class ReportsController {
 
   @ApiOperation({ summary: 'Get operations report' })
   @Get('operations')
-  operations() {
-    return this.service.operations();
+  operations(@Query() query: ReportQueryDto) {
+    return this.service.operations(query);
   }
 
   @ApiOperation({ summary: 'Get billing report' })
   @Get('billing')
-  billing() {
-    return this.service.billing();
+  billing(@Query() query: ReportQueryDto) {
+    return this.service.billing(query);
   }
 }
