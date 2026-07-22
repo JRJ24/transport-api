@@ -33,9 +33,9 @@ export class CreatePaymentDto {
   @IsString()
   currency?: string;
 
-  @ApiPropertyOptional({ enum: ['cardnet', 'azul', 'internal-mock'] })
+  @ApiPropertyOptional({ enum: ['cardnet', 'azul'] })
   @IsOptional()
-  @IsIn(['cardnet', 'azul', 'internal-mock'])
+  @IsIn(['cardnet', 'azul'])
   provider?: string;
 
   @ApiPropertyOptional({

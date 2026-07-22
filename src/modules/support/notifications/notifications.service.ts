@@ -2,14 +2,18 @@ import { ForbiddenException, Injectable } from '@nestjs/common';
 import type { Notification, Prisma } from '@generated/prisma/client';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { PrismaService } from '@/database/prisma.service';
+import { RealtimeService } from '@/modules/realtime/realtime.service';
 import type { CreateNotificationDto } from './dto/create-notification.dto';
 
 @Injectable()
 export class NotificationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly realtime: RealtimeService,
+  ) {}
 
-  create(dto: CreateNotificationDto): Promise<Notification> {
-    return this.prisma.notification.create({
+  async create(dto: CreateNotificationDto): Promise<Notification> {
+    const notification = await this.prisma.notification.create({
       data: {
         userId: dto.userId,
         title: dto.title.trim(),
@@ -18,6 +22,17 @@ export class NotificationsService {
         data: (dto.data ?? {}) as Prisma.InputJsonObject,
       },
     });
+
+    this.realtime.emitNotificationCreated(dto.userId, {
+      id: notification.id,
+      title: notification.title,
+      message: notification.message,
+      notificationType: notification.notificationType,
+      data: notification.data,
+      createdAt: notification.createdAt.toISOString(),
+    });
+
+    return notification;
   }
 
   listMine(userId: string): Promise<Notification[]> {

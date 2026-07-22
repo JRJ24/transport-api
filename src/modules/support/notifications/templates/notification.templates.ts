@@ -5,12 +5,14 @@ import { NOTIFICATION_TYPE } from '@generated/prisma/enums';
  * the push `data` payload; the mobile app validates it before navigating.
  */
 export type NotificationEvent =
+  | 'ORDER_CREATED'
   | 'ORDER_ASSIGNED'
   | 'ORDER_REASSIGNED'
   | 'ORDER_CANCELLED'
   | 'ORDER_STATUS_CHANGED'
   | 'SCHEDULE_CHANGED'
   | 'PICKUP_SOON'
+  | 'INCIDENT_CREATED'
   | 'INCIDENT_UPDATED'
   | 'OPERATOR_MESSAGE'
   | 'DOCUMENT_EXPIRING'
@@ -45,6 +47,17 @@ const dropUndefined = (
   ) as Record<string, string>;
 
 const TEMPLATES: Record<NotificationEvent, Builder> = {
+  ORDER_CREATED: (ctx) => ({
+    category: NOTIFICATION_TYPE.ORDER_UPDATE,
+    title: 'Nueva orden en TMS',
+    message: `La orden ${ctx.orderCode ?? ''} está lista para despacho`.trim(),
+    data: dropUndefined({
+      type: 'ORDER_CREATED',
+      screen: 'orders',
+      orderId: ctx.orderId,
+      orderCode: ctx.orderCode,
+    }),
+  }),
   ORDER_ASSIGNED: (ctx) => ({
     category: NOTIFICATION_TYPE.ORDER_UPDATE,
     title: 'Nueva orden asignada',
@@ -109,6 +122,17 @@ const TEMPLATES: Record<NotificationEvent, Builder> = {
       type: 'PICKUP_SOON',
       screen: 'order-detail',
       orderId: ctx.orderId,
+    }),
+  }),
+  INCIDENT_CREATED: (ctx) => ({
+    category: NOTIFICATION_TYPE.INCIDENT,
+    title: 'Nueva incidencia operativa',
+    message: ctx.message ?? 'Se reportó una nueva incidencia',
+    data: dropUndefined({
+      type: 'INCIDENT_CREATED',
+      screen: 'incidents',
+      orderId: ctx.orderId,
+      incidentId: ctx.incidentId,
     }),
   }),
   INCIDENT_UPDATED: (ctx) => ({

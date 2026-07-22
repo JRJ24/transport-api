@@ -6,6 +6,16 @@ import type { CreateReservationDto } from './dto/create-reservation.dto';
 import type { ReservationQueryDto } from './dto/reservation-query.dto';
 import type { RescheduleReservationDto } from './dto/reschedule-reservation.dto';
 
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 @Injectable()
 export class ReservationsService {
   constructor(private readonly prisma: PrismaService) {}
@@ -54,7 +64,7 @@ export class ReservationsService {
       include: {
         order: {
           include: {
-            customer: { include: { user: true } },
+            customer: { include: { user: { select: SAFE_USER_SELECT } } },
             vehicleCategory: true,
           },
         },

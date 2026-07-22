@@ -7,6 +7,16 @@ import type { DriverQueryDto } from './dto/driver-query.dto';
 import type { UpdateDriverStatusDto } from './dto/update-driver-status.dto';
 import type { UpdateDriverVerificationDto } from './dto/update-driver-verification.dto';
 
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 @Injectable()
 export class DriversService {
   constructor(private readonly prisma: PrismaService) {}
@@ -41,7 +51,7 @@ export class DriversService {
 
     return this.prisma.driverProfile.findMany({
       where,
-      include: { user: true },
+      include: { user: { select: SAFE_USER_SELECT } },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -49,14 +59,14 @@ export class DriversService {
   findOne(id: string): Promise<DriverProfile | null> {
     return this.prisma.driverProfile.findUnique({
       where: { id },
-      include: { user: true, driverDocuments: true },
+      include: { user: { select: SAFE_USER_SELECT }, driverDocuments: true },
     });
   }
 
   findMine(userId: string): Promise<DriverProfile | null> {
     return this.prisma.driverProfile.findFirst({
       where: { userId },
-      include: { user: true, driverDocuments: true },
+      include: { user: { select: SAFE_USER_SELECT }, driverDocuments: true },
     });
   }
 
@@ -71,7 +81,7 @@ export class DriversService {
           dto.verificationStatus ?? VERIFICATION_STATUS.PENDING,
         ratingAVG: 0,
       },
-      include: { user: true },
+      include: { user: { select: SAFE_USER_SELECT } },
     });
   }
 

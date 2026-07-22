@@ -18,6 +18,16 @@ import type { CustomerQueryDto } from './dto/customer-query.dto';
 import type { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
 import type { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
 
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 @Injectable()
 export class CustomersService {
   constructor(private readonly prisma: PrismaService) {}
@@ -62,7 +72,7 @@ export class CustomersService {
     return this.prisma.customerProfile.findMany({
       where,
       include: {
-        user: true,
+        user: { select: SAFE_USER_SELECT },
         customerAddresses: true,
         transportOrders: { select: { id: true, status: true } },
       },

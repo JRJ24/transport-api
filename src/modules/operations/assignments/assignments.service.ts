@@ -11,6 +11,16 @@ import { PrismaService } from '@/database/prisma.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import type { CreateAssignmentDto } from './dto/create-assignment.dto';
 
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 @Injectable()
 export class AssignmentsService {
   private readonly logger = new Logger(AssignmentsService.name);
@@ -53,7 +63,7 @@ export class AssignmentsService {
     return this.prisma.orderAssignment.findMany({
       include: {
         order: true,
-        driver: { include: { user: true } },
+        driver: { include: { user: { select: SAFE_USER_SELECT } } },
         vehicle: true,
       },
       orderBy: { assignedAt: 'desc' },
@@ -73,7 +83,7 @@ export class AssignmentsService {
       where: { driverId: driver.id },
       include: {
         order: { include: { orderStops: true, orderItems: true } },
-        driver: { include: { user: true } },
+        driver: { include: { user: { select: SAFE_USER_SELECT } } },
         vehicle: true,
       },
       orderBy: { assignedAt: 'desc' },

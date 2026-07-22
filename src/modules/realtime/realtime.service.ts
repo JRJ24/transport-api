@@ -123,6 +123,42 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     this.io.to('tracking:operations').emit('order.status.changed', payload);
   }
 
+  /** Broadcasts a newly created order to the TMS operations room. */
+  emitOrderCreated(payload: {
+    orderId: string;
+    orderCode: string;
+    status: string;
+    serviceType?: string;
+    createdByUserId?: string;
+    createdAt: string;
+  }): void {
+    this.io?.to('tracking:operations').emit('order.created', payload);
+  }
+
+  /** Broadcasts a new incident to operators watching the control tower. */
+  emitIncidentCreated(payload: {
+    incidentId: string;
+    orderId: string;
+    title: string;
+    severity: string;
+    status: string;
+    reportedBy?: string;
+    reportedAt: string;
+  }): void {
+    this.io?.to('tracking:operations').emit('incident.created', payload);
+  }
+
+  /** Broadcasts incident updates that should refresh badges and inboxes. */
+  emitIncidentUpdated(payload: {
+    incidentId: string;
+    orderId: string;
+    status: string;
+    severity?: string;
+    updatedAt: string;
+  }): void {
+    this.io?.to('tracking:operations').emit('incident.updated', payload);
+  }
+
   /** Pushes a realtime notification to a specific user's personal room. */
   emitToUser(userId: string, event: string, data: unknown): void {
     this.io?.to(`user:${userId}`).emit(event, data);

@@ -16,6 +16,16 @@ import type { UpdatePaymentStatusDto } from './dto/update-payment-status.dto';
 import { PaymentProviderRegistry } from './providers/payment-provider.registry';
 import type { PaymentCheckoutResult } from './providers/payment-provider.interface';
 
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 export interface CreatePaymentResult {
   payment: Payment;
   transaction: PaymentTransaction;
@@ -48,7 +58,9 @@ export class PaymentsService {
   async create(dto: CreatePaymentDto): Promise<CreatePaymentResult> {
     const order = await this.prisma.transportOrder.findUnique({
       where: { id: dto.orderId },
-      include: { customer: { include: { user: true } } },
+      include: {
+        customer: { include: { user: { select: SAFE_USER_SELECT } } },
+      },
     });
 
     if (!order) {

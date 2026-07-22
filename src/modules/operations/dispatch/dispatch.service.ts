@@ -10,6 +10,16 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { PrismaService } from '@/database/prisma.service';
 import type { DispatchOrderDto } from './dto/dispatch-order.dto';
 
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 @Injectable()
 export class DispatchService {
   constructor(private readonly prisma: PrismaService) {}
@@ -28,7 +38,7 @@ export class DispatchService {
         availabilityStatus: STATUS_DRIVER.AVAILABLE,
         verificationStatus: VERIFICATION_STATUS.APPROVED,
       },
-      include: { user: true },
+      include: { user: { select: SAFE_USER_SELECT } },
       orderBy: { ratingAVG: 'desc' },
     });
   }

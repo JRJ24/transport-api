@@ -2,6 +2,7 @@ import {
   BadRequestException,
   ForbiddenException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import type { Prisma, TransportOrder } from '@generated/prisma/client';
@@ -22,6 +23,8 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { AssignmentsService } from '@/modules/operations/assignments/assignments.service';
+import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
+import type { NotificationEvent } from '@/modules/support/notifications/templates/notification.templates';
 import type { CancelOrderDto } from './dto/cancel-order.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import type { CreateTmsOrderDto } from './dto/create-tms-order.dto';
@@ -61,13 +64,26 @@ const DRIVER_TRANSITIONS = new Set<STATUS_ORDERS>([
   STATUS_ORDERS.FAILED,
 ]);
 
+const SAFE_USER_SELECT = {
+  id: true,
+  fullName: true,
+  email: true,
+  phone: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
 const ORDER_INCLUDE = {
   orderStops: true,
   orderItems: true,
-  customer: { include: { user: true } },
+  customer: { include: { user: { select: SAFE_USER_SELECT } } },
   vehicleCategory: true,
   orderAssignments: {
-    include: { driver: { include: { user: true } }, vehicle: true },
+    include: {
+      driver: { include: { user: { select: SAFE_USER_SELECT } } },
+      vehicle: true,
+    },
   },
   orderEvents: { orderBy: { createdAt: 'asc' as const } },
   reservations: true,
@@ -76,10 +92,13 @@ const ORDER_INCLUDE = {
 
 @Injectable()
 export class OrdersService {
+  private readonly logger = new Logger(OrdersService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeService,
     private readonly assignments: AssignmentsService,
+    private readonly notifications: NotificationDispatcherService,
   ) {}
 
   async create(
@@ -112,7 +131,7 @@ export class OrdersService {
       });
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const order = await this.prisma.$transaction(async (tx) => {
       const order = await tx.transportOrder.create({
         data: {
           orderCode: this.generateOrderCode(),
@@ -183,6 +202,15 @@ export class OrdersService {
 
       return order;
     });
+
+    this.emitOrderCreated(order, user.id);
+    void this.notifyOperators('ORDER_CREATED', order).catch((error: unknown) =>
+      this.logger.error(
+        `Failed to notify operators about new order: ${error instanceof Error ? error.message : 'unknown'}`,
+      ),
+    );
+
+    return order;
   }
 
   async createFromTms(
@@ -217,7 +245,7 @@ export class OrdersService {
       });
     }
 
-    return this.prisma.$transaction(async (tx) => {
+    const order = await this.prisma.$transaction(async (tx) => {
       const quote = dto.quoteId
         ? await tx.priceQuote.findFirst({
             where: { id: dto.quoteId, customerId: dto.customerId },
@@ -317,6 +345,15 @@ export class OrdersService {
 
       return order;
     });
+
+    this.emitOrderCreated(order, user.id);
+    void this.notifyOperators('ORDER_CREATED', order).catch((error: unknown) =>
+      this.logger.error(
+        `Failed to notify operators about new TMS order: ${error instanceof Error ? error.message : 'unknown'}`,
+      ),
+    );
+
+    return order;
   }
 
   async findAll(
@@ -481,6 +518,13 @@ export class OrdersService {
       changedAt: now.toISOString(),
     });
 
+    void this.notifyOperators('ORDER_STATUS_CHANGED', order, dto.status).catch(
+      (error: unknown) =>
+        this.logger.error(
+          `Failed to notify operators about order status: ${error instanceof Error ? error.message : 'unknown'}`,
+        ),
+    );
+
     return order;
   }
 
@@ -524,7 +568,7 @@ export class OrdersService {
     id: string,
     dto: CancelOrderDto,
   ): Promise<TransportOrder> {
-    return this.prisma.$transaction(async (tx) => {
+    const order = await this.prisma.$transaction(async (tx) => {
       const order = await tx.transportOrder.update({
         where: { id },
         data: { status: STATUS_ORDERS.CANCELLED },
@@ -559,6 +603,21 @@ export class OrdersService {
 
       return order;
     });
+
+    this.realtime.emitOrderStatusChanged({
+      orderId: id,
+      status: STATUS_ORDERS.CANCELLED,
+      changedByUserId: user.id,
+      changedAt: new Date().toISOString(),
+    });
+    void this.notifyOperators('ORDER_CANCELLED', order).catch(
+      (error: unknown) =>
+        this.logger.error(
+          `Failed to notify operators about cancelled order: ${error instanceof Error ? error.message : 'unknown'}`,
+        ),
+    );
+
+    return order;
   }
 
   listEvents(orderId: string) {
@@ -684,6 +743,47 @@ export class OrdersService {
       default:
         return EVENT_TYPE.CREATED;
     }
+  }
+
+  private emitOrderCreated(
+    order: TransportOrder,
+    createdByUserId: string,
+  ): void {
+    this.realtime.emitOrderCreated({
+      orderId: order.id,
+      orderCode: order.orderCode,
+      status: order.status,
+      serviceType: order.serviceType,
+      createdByUserId,
+      createdAt: order.createdAt.toISOString(),
+    });
+  }
+
+  private async notifyOperators(
+    event: NotificationEvent,
+    order: TransportOrder,
+    status?: string,
+  ): Promise<void> {
+    const operators = await this.prisma.user.findMany({
+      where: {
+        userRoles: {
+          some: {
+            rol: { code: { in: [ROLES.ADMIN, ROLES.OPERATOR] } },
+          },
+        },
+      },
+      select: { id: true },
+    });
+
+    await Promise.allSettled(
+      operators.map((operator) =>
+        this.notifications.dispatch(operator.id, event, {
+          orderId: order.id,
+          orderCode: order.orderCode,
+          status,
+        }),
+      ),
+    );
   }
 
   private generateOrderCode(): string {
