@@ -41,6 +41,28 @@ export const envSchema = z.object({
     .url()
     .default('https://routes.googleapis.com'),
   GOOGLE_ROUTES_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  GOOGLE_MAPS_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+  GOOGLE_PLACES_API_BASE_URL: z
+    .string()
+    .url()
+    .default('https://places.googleapis.com/v1'),
+  GOOGLE_GEOCODING_API_BASE_URL: z
+    .string()
+    .url()
+    .default('https://maps.googleapis.com/maps/api/geocode/json'),
+  GOOGLE_ADDRESS_VALIDATION_API_BASE_URL: z
+    .string()
+    .url()
+    .default('https://addressvalidation.googleapis.com/v1:validateAddress'),
+  GOOGLE_ROADS_API_BASE_URL: z
+    .string()
+    .url()
+    .default('https://roads.googleapis.com/v1'),
+  GOOGLE_ROUTE_OPTIMIZATION_API_BASE_URL: z
+    .string()
+    .url()
+    .default('https://routeoptimization.googleapis.com'),
+  GOOGLE_ROUTE_OPTIMIZATION_PROJECT_ID: z.string().optional(),
   PAYMENT_PROVIDER: z
     .enum([
       'cardnet',
@@ -78,6 +100,23 @@ export const envSchema = z.object({
   REDIS_HOST: z.string().default('127.0.0.1'),
   REDIS_PORT: z.coerce.number().int().positive().default(6379),
   NOTIFICATIONS_QUEUE_DRIVER: z.enum(['bullmq', 'inline']).optional(),
+
+  // ── Evidence file storage (S3-compatible Spaces) ─────────────────────────
+  STORAGE_DRIVER: z.enum(['spaces', 's3', 'local']).default('spaces'),
+  SPACES_ENDPOINT: z.string().optional(),
+  SPACES_REGION: z.string().default('nyc3'),
+  SPACES_BUCKET: z.string().optional(),
+  SPACES_NAME: z.string().optional(),
+  SPACES_PUBLIC_URL: z.string().optional(),
+  SPACES_UPLOAD_PREFIX: z.string().default('evidences'),
+  SPACES_ACCESS_KEY_ID: z.string().optional(),
+  SPACES_SECRET_ACCESS_KEY: z.string().optional(),
+  ACCESS_KEY_ID: z.string().optional(),
+  ACCESS_SECRET_KEY: z.string().optional(),
+  ACCESS_KEY_NAME: z.string().optional(),
+  MAX_UPLOAD_MB: z.coerce.number().int().positive().default(50),
+  LOCAL_UPLOAD_DIR: z.string().optional(),
+  LOCAL_UPLOAD_PUBLIC_URL: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;

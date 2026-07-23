@@ -62,10 +62,11 @@ export class DriversController {
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.DRIVER)
   @Patch(':id/status')
   updateStatus(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: UpdateDriverStatusDto,
   ): Promise<DriverProfile> {
-    return this.service.updateStatus(id, dto);
+    return this.service.updateStatus(user, id, dto);
   }
 
   @ApiOperation({ summary: 'Update driver verification status' })

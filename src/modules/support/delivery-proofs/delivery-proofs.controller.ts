@@ -57,9 +57,10 @@ export class DeliveryProofsController {
   @Roles(ROLES.DRIVER, ROLES.ADMIN, ROLES.OPERATOR)
   @Post(':id/signatures')
   addSignature(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: CreateSignatureDto,
   ): Promise<Signature> {
-    return this.service.addSignature(id, dto);
+    return this.service.addSignature(user, id, dto);
   }
 }

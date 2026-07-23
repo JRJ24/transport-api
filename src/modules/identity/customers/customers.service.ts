@@ -1,19 +1,25 @@
 import {
   BadRequestException,
   ConflictException,
+  Inject,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomBytes } from 'crypto';
+import type { ConfigType } from '@nestjs/config';
 import type {
   CustomerAddress,
   CustomerProfile,
   Prisma,
 } from '@generated/prisma/client';
-import { TYPE_CUSTOMER } from '@generated/prisma/enums';
+import { ROLES, TYPE_CUSTOMER } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import { hashPassword } from '@/common/utils/hash.util';
+import { authConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import type { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
+import type { CreateTmsCustomerDto } from './dto/create-tms-customer.dto';
 import type { CustomerQueryDto } from './dto/customer-query.dto';
 import type { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
 import type { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
@@ -30,7 +36,11 @@ const SAFE_USER_SELECT = {
 
 @Injectable()
 export class CustomersService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Inject(authConfig.KEY)
+    private readonly auth: ConfigType<typeof authConfig>,
+  ) {}
 
   list(query: CustomerQueryDto): Promise<CustomerProfile[]> {
     const where: Prisma.CustomerProfileWhereInput = {
@@ -114,6 +124,100 @@ export class CustomersService {
     });
   }
 
+  async createFromTms(
+    actorUserId: string,
+    dto: CreateTmsCustomerDto,
+  ): Promise<unknown> {
+    this.assertBusinessHasCompanyName(dto.customerType, dto.companyName);
+
+    const email = dto.email.toLowerCase().trim();
+    const phone = dto.phone.trim();
+    const documentNumber = dto.documentNumber.trim();
+
+    const [existingUser, existingDocument] = await Promise.all([
+      this.prisma.user.findFirst({
+        where: { OR: [{ email }, { phone }] },
+        select: { id: true, email: true, phone: true },
+      }),
+      this.prisma.customerProfile.findFirst({
+        where: { documentNumber },
+        select: { id: true },
+      }),
+    ]);
+
+    if (existingUser) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'A user with this email or phone already exists',
+      });
+    }
+
+    if (existingDocument) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'A customer with this document already exists',
+      });
+    }
+
+    const passwordHash = await hashPassword(
+      randomBytes(24).toString('base64url'),
+      this.auth.bcryptSaltRounds,
+    );
+
+    return this.prisma.$transaction(async (tx) => {
+      const customerUser = await tx.user.create({
+        data: {
+          fullName: dto.fullName.trim(),
+          email,
+          phone,
+          passwordHash,
+          userRoles: {
+            create: {
+              rol: { connect: { code: ROLES.CUSTOMER } },
+            },
+          },
+        },
+        select: SAFE_USER_SELECT,
+      });
+
+      const profile = await tx.customerProfile.create({
+        data: {
+          userId: customerUser.id,
+          customerType: dto.customerType,
+          documentType: dto.documentType,
+          documentNumber,
+          companyName: this.optionalString(dto.companyName),
+          billingEmail: this.optionalEmail(dto.billingEmail),
+          createdAt: new Date(),
+        },
+        include: {
+          user: { select: SAFE_USER_SELECT },
+          customerAddresses: true,
+          transportOrders: { select: { id: true, status: true } },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'CUSTOMER_CREATED_FAST',
+          entityType: 'CUSTOMER',
+          entityId: profile.id,
+          newValues: {
+            customerId: profile.id,
+            userId: customerUser.id,
+            source: 'transport-portal',
+          },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+
+      return profile;
+    });
+  }
+
   async updateProfile(
     userId: string,
     dto: UpdateCustomerProfileDto,
@@ -182,8 +286,8 @@ export class CustomersService {
           addressesLine: dto.addressLine.trim(),
           city: dto.city.trim(),
           province: dto.province.trim(),
-          latitude: dto.latitude,
-          longitude: dto.longitude,
+          latitude: dto.latitude ?? null,
+          longitude: dto.longitude ?? null,
           isDefault: shouldSetDefault,
           createdAt: new Date(),
         },

@@ -1,12 +1,25 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Attachment } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
+import type { Request } from 'express';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
-import { AttachmentsService } from './attachments.service';
+import type { UploadedFile } from '@/common/middlewares/processFile';
+import {
+  AttachmentsService,
+  type UploadedAttachment,
+} from './attachments.service';
 import { CreateAttachmentDto } from './dto/create-attachment.dto';
+
+type UploadRequest = Request & {
+  body: {
+    uploadedFiles?: UploadedFile[];
+    entityType?: string;
+    entityId?: string;
+  };
+};
 
 @ApiTags('attachments')
 @ApiBearerAuth()
@@ -32,5 +45,20 @@ export class AttachmentsController {
     @Body() dto: CreateAttachmentDto,
   ): Promise<Attachment> {
     return this.service.create(user, dto);
+  }
+
+  @ApiOperation({ summary: 'Upload files and optionally attach them to an entity' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
+  @Post('upload')
+  upload(
+    @CurrentUser() user: AuthenticatedUser,
+    @Req() req: UploadRequest,
+  ): Promise<UploadedAttachment[]> {
+    return this.service.createFromUploadedFiles(
+      user,
+      req.body.uploadedFiles ?? [],
+      req.body.entityType,
+      req.body.entityId,
+    );
   }
 }

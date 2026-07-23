@@ -1,13 +1,21 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import type { OrderAssignment, Prisma } from '@generated/prisma/client';
 import {
   ASSIGNMENT_STATUS,
   EVENT_TYPE,
+  ROLES,
   STATUS_DRIVER,
   STATUS_ORDERS,
 } from '@generated/prisma/enums';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
+import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import type { CreateAssignmentDto } from './dto/create-assignment.dto';
 
@@ -28,6 +36,7 @@ export class AssignmentsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationDispatcherService,
+    private readonly realtime: RealtimeService,
   ) {}
 
   /** Notifies the assigned driver about a new order (best-effort). */
@@ -94,6 +103,11 @@ export class AssignmentsService {
     user: AuthenticatedUser,
     dto: CreateAssignmentDto,
   ): Promise<OrderAssignment> {
+    const currentOrder = await this.prisma.transportOrder.findUnique({
+      where: { id: dto.orderId },
+      select: { status: true },
+    });
+
     const assignment = await this.prisma.$transaction(async (tx) => {
       const created = await tx.orderAssignment.create({
         data: {
@@ -119,11 +133,27 @@ export class AssignmentsService {
     });
 
     await this.notifyDriverAssigned(dto.driverId, dto.orderId);
+    this.realtime.emitAssignmentCreated({
+      assignmentId: assignment.id,
+      orderId: assignment.orderId,
+      driverId: assignment.driverId,
+      vehicleId: assignment.vehicleId,
+      assignmentStatus: assignment.assignmentStatus,
+      assignedAt: assignment.assignedAt.toISOString(),
+    });
+    this.realtime.emitOrderStatusChanged({
+      orderId: dto.orderId,
+      status: STATUS_ORDERS.ASSIGNED,
+      previousStatus: currentOrder?.status,
+      changedByUserId: user.id,
+      changedAt: new Date().toISOString(),
+    });
     return assignment;
   }
 
   accept(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
     return this.prisma.$transaction(async (tx) => {
+      await this.assertCanMutateAssignment(tx, id, user);
       const assignment = await tx.orderAssignment.update({
         where: { id },
         data: {
@@ -149,6 +179,7 @@ export class AssignmentsService {
 
   reject(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
     return this.prisma.$transaction(async (tx) => {
+      await this.assertCanMutateAssignment(tx, id, user);
       const assignment = await tx.orderAssignment.update({
         where: { id },
         data: {
@@ -210,5 +241,40 @@ export class AssignmentsService {
         longitude: 0,
       },
     });
+  }
+
+  private async assertCanMutateAssignment(
+    tx: Prisma.TransactionClient,
+    assignmentId: string,
+    user: AuthenticatedUser,
+  ): Promise<void> {
+    if (
+      user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
+    ) {
+      return;
+    }
+
+    const driver = await tx.driverProfile.findFirst({
+      where: { userId: user.id },
+      select: { id: true },
+    });
+    const assignment = await tx.orderAssignment.findUnique({
+      where: { id: assignmentId },
+      select: { driverId: true },
+    });
+
+    if (!assignment) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Assignment not found',
+      });
+    }
+
+    if (!driver || assignment.driverId !== driver.id) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'You cannot mutate another driver assignment',
+      });
+    }
   }
 }

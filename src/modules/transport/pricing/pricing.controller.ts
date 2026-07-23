@@ -17,9 +17,13 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { CreatePriceQuoteDto } from './dto/create-price-quote.dto';
 import { CreateRateCardDto } from './dto/create-rate-card.dto';
 import { CreateRateRuleDto } from './dto/create-rate-rule.dto';
+import { PreviewManualQuoteDto } from './dto/manual-quote.dto';
 import { RateCardQueryDto } from './dto/rate-card-query.dto';
 import { UpdateRateCardDto } from './dto/update-rate-card.dto';
-import { PricingService } from './pricing.service';
+import {
+  PricingService,
+  type ManualQuoteCalculation,
+} from './pricing.service';
 
 @ApiTags('pricing')
 @ApiBearerAuth()
@@ -66,6 +70,16 @@ export class PricingController {
     @Body() dto: CreateRateRuleDto,
   ): Promise<RateRule> {
     return this.service.createRateRule(id, dto);
+  }
+
+  @ApiOperation({ summary: 'Preview a manual/provisional quote for TMS' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Post('manual-quotes/preview')
+  previewManualQuote(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: PreviewManualQuoteDto,
+  ): Promise<ManualQuoteCalculation> {
+    return this.service.previewManualQuote(user, dto);
   }
 
   @ApiOperation({ summary: 'Create an internal/mock price quote' })

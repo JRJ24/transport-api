@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import type {
   Payment,
   PaymentTransaction,
@@ -70,11 +70,20 @@ export class PaymentsService {
       });
     }
 
+    const amount = dto.amount ?? order.totalAmount;
+
+    if (amount === null) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Order has no calculated amount available for payment',
+      });
+    }
+
     const payment = await this.prisma.payment.create({
       data: {
         orderId: order.id,
         customerId: order.customerId,
-        amount: dto.amount ?? order.totalAmount,
+        amount,
         currency: dto.currency?.trim().toUpperCase() ?? 'DOP',
         paymentMethod: dto.paymentMethod,
         paymentProvider: this.providers.get(dto.provider).name,

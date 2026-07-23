@@ -15,7 +15,13 @@ import {
   ValidateNested,
 } from 'class-validator';
 import { SERVICE_TYPE } from '@generated/prisma/enums';
+import { CreateOrderManualQuoteDto } from '@/modules/transport/pricing/dto/manual-quote.dto';
 import { CreateOrderItemDto, CreateOrderStopDto } from './create-order.dto';
+
+export enum TMS_ORDER_SUBMIT_MODE {
+  DRAFT = 'DRAFT',
+  CREATE_AND_QUOTE = 'CREATE_AND_QUOTE',
+}
 
 export class CreateTmsOrderDto {
   @ApiProperty({ format: 'uuid' })
@@ -35,35 +41,49 @@ export class CreateTmsOrderDto {
   @IsEnum(SERVICE_TYPE)
   serviceType!: SERVICE_TYPE;
 
+  @ApiPropertyOptional({ enum: TMS_ORDER_SUBMIT_MODE })
+  @IsOptional()
+  @IsEnum(TMS_ORDER_SUBMIT_MODE)
+  submitMode?: TMS_ORDER_SUBMIT_MODE;
+
   @ApiPropertyOptional({ example: '2026-07-15T16:00:00.000Z' })
   @IsOptional()
   @Type(() => Date)
   @IsDate()
   scheduleAt?: Date;
 
-  @ApiProperty({ example: 12.4 })
+  @ApiPropertyOptional({ example: 12.4 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(0)
-  distanceKm!: number;
+  distanceKm?: number;
 
-  @ApiProperty({ example: 32 })
+  @ApiPropertyOptional({ example: 32 })
+  @IsOptional()
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  estimatedDurationMin!: number;
+  estimatedDurationMin?: number;
 
-  @ApiProperty({ example: 1850 })
+  @ApiPropertyOptional({ example: 1850 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(0)
-  totalAmount!: number;
+  totalAmount?: number;
 
   @ApiPropertyOptional({ example: 'Creada desde torre de control' })
   @IsOptional()
   @IsString()
   @MaxLength(500)
   notes?: string;
+
+  @ApiPropertyOptional({ type: CreateOrderManualQuoteDto })
+  @IsOptional()
+  @ValidateNested()
+  @Type(() => CreateOrderManualQuoteDto)
+  manualQuote?: CreateOrderManualQuoteDto;
 
   @ApiProperty({ type: [CreateOrderStopDto] })
   @IsArray()

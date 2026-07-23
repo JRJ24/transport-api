@@ -1,8 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import type { Attachment } from '@generated/prisma/client';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
+import type { UploadedFile } from '@/common/middlewares/processFile';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateAttachmentDto } from './dto/create-attachment.dto';
+
+export interface UploadedAttachment {
+  file: UploadedFile;
+  attachment: Attachment | null;
+}
 
 @Injectable()
 export class AttachmentsService {
@@ -24,6 +30,38 @@ export class AttachmentsService {
         createdAt: new Date(),
       },
     });
+  }
+
+  async createFromUploadedFiles(
+    user: AuthenticatedUser,
+    files: UploadedFile[],
+    entityType?: string,
+    entityId?: string,
+  ): Promise<UploadedAttachment[]> {
+    const normalizedEntityType = entityType?.trim();
+    const normalizedEntityId = entityId?.trim();
+
+    return Promise.all(
+      files.map(async (file) => {
+        const attachment =
+          normalizedEntityType && normalizedEntityId
+            ? await this.prisma.attachment.create({
+                data: {
+                  entityType: normalizedEntityType,
+                  entityId: normalizedEntityId,
+                  fileName: file.fileName,
+                  fileUrl: file.url,
+                  fileSize: file.size,
+                  mimeType: file.mimeType,
+                  uploadedBy: user.id,
+                  createdAt: new Date(),
+                },
+              })
+            : null;
+
+        return { file, attachment };
+      }),
+    );
   }
 
   list(entityType?: string, entityId?: string): Promise<Attachment[]> {

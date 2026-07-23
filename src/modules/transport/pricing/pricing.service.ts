@@ -1,14 +1,21 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type {
   PriceQuote,
   Prisma,
   RateCard,
   RateRule,
 } from '@generated/prisma/client';
+import { QUOTE_SOURCE, QUOTE_STATUS, ROLES } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreatePriceQuoteDto } from './dto/create-price-quote.dto';
+import type { PreviewManualQuoteDto } from './dto/manual-quote.dto';
 import type { CreateRateCardDto } from './dto/create-rate-card.dto';
 import type { CreateRateRuleDto } from './dto/create-rate-rule.dto';
 import type { RateCardQueryDto } from './dto/rate-card-query.dto';
@@ -16,6 +23,43 @@ import type { UpdateRateCardDto } from './dto/update-rate-card.dto';
 
 const TAX_RATE = 0.18;
 const QUOTE_TTL_MS = 15 * 60_000;
+const MANUAL_QUOTE_TTL_MS = 24 * 60 * 60_000;
+
+type QuoteDbClient = PrismaService | Prisma.TransactionClient;
+
+export interface ManualQuoteInput {
+  customerId: string;
+  orderId?: string | null;
+  vehicleCategoryId: string;
+  originAddress: string;
+  destinationAddress: string;
+  distanceKm: number;
+  estimatedDurationMin?: number;
+  helperRequired?: boolean;
+  tollAmount?: number;
+  weightSurcharge?: number;
+  volumeSurcharge?: number;
+  otherCharges?: number;
+  discountAmount?: number;
+  manualAdjustmentAmount?: number;
+  adjustmentReason?: string;
+}
+
+export interface ManualQuoteCalculation {
+  quoteSource: QUOTE_SOURCE;
+  quoteStatus: QUOTE_STATUS;
+  distanceKm: number;
+  estimatedDurationMin: number;
+  baseAmount: number;
+  extrasAmount: number;
+  demandAmount: number;
+  weatherAmount: number;
+  taxAmount: number;
+  totalAmount: number;
+  manualAdjustmentAmount: number;
+  adjustmentReason?: string;
+  breakdown: Prisma.InputJsonObject;
+}
 
 @Injectable()
 export class PricingService {
@@ -122,12 +166,20 @@ export class PricingService {
     }
 
     const rule = await this.findActiveRule(dto.vehicleCategoryId);
-    const baseFare = Number(rule?.baseFare ?? 250);
-    const pricePerKm = Number(rule?.pricePerKM ?? 35);
-    const pricePerMinute = Number(rule?.pricePerMinute ?? 5);
-    const minimumFare = Number(rule?.minimumFare ?? 350);
-    const helperFee = dto.requireHelper ? Number(rule?.helperFee ?? 150) : 0;
-    const nightFee = dto.nightService ? Number(rule?.nightFee ?? 100) : 0;
+
+    if (!rule) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'No active rate rule found for the selected vehicle category',
+      });
+    }
+
+    const baseFare = Number(rule.baseFare);
+    const pricePerKm = Number(rule.pricePerKM);
+    const pricePerMinute = Number(rule.pricePerMinute);
+    const minimumFare = Number(rule.minimumFare);
+    const helperFee = dto.requireHelper ? Number(rule.helperFee) : 0;
+    const nightFee = dto.nightService ? Number(rule.nightFee) : 0;
 
     const variableAmount =
       dto.distanceKm * pricePerKm + dto.estimatedDurationMin * pricePerMinute;
@@ -158,6 +210,159 @@ export class PricingService {
     });
   }
 
+  previewManualQuote(
+    user: AuthenticatedUser,
+    dto: PreviewManualQuoteDto,
+  ): Promise<ManualQuoteCalculation> {
+    return this.calculateManualQuote(user, dto);
+  }
+
+  async calculateManualQuote(
+    user: AuthenticatedUser,
+    input: ManualQuoteInput,
+  ): Promise<ManualQuoteCalculation> {
+    const manualAdjustmentAmount = input.manualAdjustmentAmount ?? 0;
+    if (manualAdjustmentAmount !== 0 && !user.roles.includes(ROLES.ADMIN)) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN_ROLE,
+        message: 'Only administrators can apply manual price adjustments',
+      });
+    }
+
+    const [customer, rule] = await Promise.all([
+      this.prisma.customerProfile.findUnique({
+        where: { id: input.customerId },
+        select: { id: true },
+      }),
+      this.findActiveRule(input.vehicleCategoryId),
+    ]);
+
+    if (!customer) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Customer profile not found',
+      });
+    }
+
+    if (!rule) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'No active rate rule found for the selected vehicle category',
+      });
+    }
+
+    const distanceKm = input.distanceKm;
+    const estimatedDurationMin = Math.round(input.estimatedDurationMin ?? 0);
+    const baseFare = Number(rule.baseFare);
+    const pricePerKm = Number(rule.pricePerKM);
+    const pricePerMinute = Number(rule.pricePerMinute);
+    const minimumFare = Number(rule.minimumFare);
+    const helperFee = input.helperRequired ? Number(rule.helperFee) : 0;
+    const tollAmount = input.tollAmount ?? 0;
+    const weightSurcharge = input.weightSurcharge ?? 0;
+    const volumeSurcharge = input.volumeSurcharge ?? 0;
+    const otherCharges = input.otherCharges ?? 0;
+    const discountAmount = input.discountAmount ?? 0;
+    const distanceAmount = distanceKm * pricePerKm;
+    const durationAmount = estimatedDurationMin * pricePerMinute;
+    const routeAmount = baseFare + distanceAmount + durationAmount;
+    const extrasAmount =
+      helperFee + tollAmount + weightSurcharge + volumeSurcharge + otherCharges;
+    const subtotalBeforeMinimum = routeAmount + extrasAmount - discountAmount;
+    const subtotal = Math.max(minimumFare, subtotalBeforeMinimum);
+    const taxAmount = subtotal * TAX_RATE;
+    const totalAmount = subtotal + taxAmount + manualAdjustmentAmount;
+
+    const breakdown: Prisma.InputJsonObject = {
+      quoteSource: QUOTE_SOURCE.MANUAL,
+      quoteStatus: QUOTE_STATUS.PROVISIONAL,
+      rateRuleId: rule.id,
+      rateCardId: rule.rateCardId,
+      baseFare,
+      pricePerKm,
+      pricePerMinute,
+      minimumFare,
+      distanceKm,
+      estimatedDurationMin,
+      distanceAmount: roundMoney(distanceAmount),
+      durationAmount: roundMoney(durationAmount),
+      routeAmount: roundMoney(routeAmount),
+      helperFee: roundMoney(helperFee),
+      tollAmount: roundMoney(tollAmount),
+      weightSurcharge: roundMoney(weightSurcharge),
+      volumeSurcharge: roundMoney(volumeSurcharge),
+      otherCharges: roundMoney(otherCharges),
+      discountAmount: roundMoney(discountAmount),
+      subtotalBeforeMinimum: roundMoney(subtotalBeforeMinimum),
+      subtotal: roundMoney(subtotal),
+      taxRate: TAX_RATE,
+      taxAmount: roundMoney(taxAmount),
+      manualAdjustmentAmount: roundMoney(manualAdjustmentAmount),
+      totalAmount: roundMoney(totalAmount),
+    };
+
+    return {
+      quoteSource: QUOTE_SOURCE.MANUAL,
+      quoteStatus: QUOTE_STATUS.PROVISIONAL,
+      distanceKm,
+      estimatedDurationMin,
+      baseAmount: roundMoney(routeAmount),
+      extrasAmount: roundMoney(extrasAmount),
+      demandAmount: 0,
+      weatherAmount: 0,
+      taxAmount: roundMoney(taxAmount),
+      totalAmount: roundMoney(totalAmount),
+      manualAdjustmentAmount: roundMoney(manualAdjustmentAmount),
+      adjustmentReason: input.adjustmentReason?.trim() || undefined,
+      breakdown,
+    };
+  }
+
+  createManualQuote(
+    user: AuthenticatedUser,
+    input: ManualQuoteInput,
+    calculation: ManualQuoteCalculation,
+    db: QuoteDbClient = this.prisma,
+  ): Promise<PriceQuote> {
+    return db.priceQuote.create({
+      data: {
+        customerId: input.customerId,
+        orderId: input.orderId ?? null,
+        vehicleCategoryId: input.vehicleCategoryId,
+        originAddress: input.originAddress.trim(),
+        destinationAddress: input.destinationAddress.trim(),
+        distanceKm: calculation.distanceKm,
+        estimatedDurationMin: calculation.estimatedDurationMin,
+        baseAmount: calculation.baseAmount,
+        extrasAmount: calculation.extrasAmount,
+        demandAmount: calculation.demandAmount,
+        weatherAmount: calculation.weatherAmount,
+        taxAmount: calculation.taxAmount,
+        totalAmount: calculation.totalAmount,
+        quoteSource: calculation.quoteSource,
+        quoteStatus: calculation.quoteStatus,
+        breakdown: calculation.breakdown,
+        manualAdjustmentAmount: calculation.manualAdjustmentAmount,
+        adjustmentReason: calculation.adjustmentReason ?? null,
+        adjustedBy: calculation.manualAdjustmentAmount !== 0 ? user.id : null,
+        expiresAt: new Date(Date.now() + MANUAL_QUOTE_TTL_MS),
+      },
+    });
+  }
+
+  replaceActiveOrderQuotes(
+    orderId: string,
+    db: QuoteDbClient = this.prisma,
+  ): Promise<Prisma.BatchPayload> {
+    return db.priceQuote.updateMany({
+      where: {
+        orderId,
+        quoteStatus: { not: QUOTE_STATUS.REPLACED },
+      },
+      data: { quoteStatus: QUOTE_STATUS.REPLACED },
+    });
+  }
+
   getQuote(id: string): Promise<PriceQuote | null> {
     return this.prisma.priceQuote.findUnique({ where: { id } });
   }
@@ -177,4 +382,8 @@ export class PricingService {
       orderBy: { createdAt: 'desc' },
     });
   }
+}
+
+function roundMoney(value: number): number {
+  return Number(value.toFixed(2));
 }

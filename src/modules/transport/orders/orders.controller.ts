@@ -17,6 +17,7 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { CancelOrderDto } from './dto/cancel-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateTmsOrderDto } from './dto/create-tms-order.dto';
+import { CreateOrderManualQuoteDto } from '../pricing/dto/manual-quote.dto';
 import { OrderQueryDto } from './dto/order-query.dto';
 import { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 import { OrdersService } from './orders.service';
@@ -57,6 +58,13 @@ export class OrdersController {
     return this.service.findAll(user, query);
   }
 
+  @ApiOperation({ summary: 'List requested orders visible to drivers' })
+  @Roles(ROLES.DRIVER)
+  @Get('available')
+  findAvailableForDrivers(): Promise<TransportOrder[]> {
+    return this.service.findAvailableForDrivers();
+  }
+
   @ApiOperation({ summary: 'Get order detail' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get(':id')
@@ -86,6 +94,17 @@ export class OrdersController {
     @Body() dto: UpdateOrderStatusDto,
   ): Promise<TransportOrder> {
     return this.service.updateStatus(user, id, dto);
+  }
+
+  @ApiOperation({ summary: 'Create a manual/provisional quote for an order' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Post(':id/quotes/manual')
+  createManualQuote(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CreateOrderManualQuoteDto,
+  ): Promise<TransportOrder> {
+    return this.service.createManualQuote(user, id, dto);
   }
 
   @ApiOperation({ summary: 'Cancel an order' })

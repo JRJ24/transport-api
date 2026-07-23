@@ -1,4 +1,6 @@
 import { Module } from '@nestjs/common';
+import { GoogleMapsController } from './google-maps.controller';
+import { GoogleMapsPlatformService } from './google-maps-platform.service';
 import { GoogleRoutesService } from './google-routes.service';
 
 /**
@@ -6,7 +8,8 @@ import { GoogleRoutesService } from './google-routes.service';
  * Routes API key is read from configuration and never leaves the backend.
  */
 @Module({
-  providers: [GoogleRoutesService],
-  exports: [GoogleRoutesService],
+  controllers: [GoogleMapsController],
+  providers: [GoogleRoutesService, GoogleMapsPlatformService],
+  exports: [GoogleRoutesService, GoogleMapsPlatformService],
 })
 export class GoogleMapsModule {}

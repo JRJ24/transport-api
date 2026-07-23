@@ -1,6 +1,8 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable } from '@nestjs/common';
 import type { DriverProfile, Prisma } from '@generated/prisma/client';
-import { STATUS_DRIVER, VERIFICATION_STATUS } from '@generated/prisma/enums';
+import { ROLES, STATUS_DRIVER, VERIFICATION_STATUS } from '@generated/prisma/enums';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateDriverDto } from './dto/create-driver.dto';
 import type { DriverQueryDto } from './dto/driver-query.dto';
@@ -85,7 +87,27 @@ export class DriversService {
     });
   }
 
-  updateStatus(id: string, dto: UpdateDriverStatusDto): Promise<DriverProfile> {
+  async updateStatus(
+    user: AuthenticatedUser,
+    id: string,
+    dto: UpdateDriverStatusDto,
+  ): Promise<DriverProfile> {
+    if (
+      user.roles.includes(ROLES.DRIVER) &&
+      !user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
+    ) {
+      const driver = await this.prisma.driverProfile.findFirst({
+        where: { userId: user.id },
+        select: { id: true },
+      });
+      if (!driver || driver.id !== id) {
+        throw new ForbiddenException({
+          code: ERROR_CODES.FORBIDDEN,
+          message: 'You cannot update another driver profile',
+        });
+      }
+    }
+
     return this.prisma.driverProfile.update({
       where: { id },
       data: { availabilityStatus: dto.availabilityStatus },

@@ -1,8 +1,9 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsOptional, IsString, MaxLength } from 'class-validator';
 import { STATUS_ACCOUNT, TYPE_CUSTOMER } from '@generated/prisma/enums';
+import { PaginationQueryDto } from '@/common/dto/pagination-query.dto';
 
-export class CustomerQueryDto {
+export class CustomerQueryDto extends PaginationQueryDto {
   @ApiPropertyOptional({ enum: TYPE_CUSTOMER })
   @IsOptional()
   @IsEnum(TYPE_CUSTOMER)

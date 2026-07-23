@@ -4,6 +4,7 @@ import {
   ArrayMaxSize,
   IsArray,
   IsNumber,
+  IsOptional,
   Max,
   Min,
   ValidateNested,
@@ -37,6 +38,7 @@ export class ComputeRouteDto {
   destination!: RoutePointDto;
 
   @ApiPropertyOptional({ type: [RoutePointDto] })
+  @IsOptional()
   @IsArray()
   @ArrayMaxSize(23)
   @ValidateNested({ each: true })

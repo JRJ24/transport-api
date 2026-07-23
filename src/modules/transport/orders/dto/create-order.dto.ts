@@ -12,6 +12,7 @@ import {
   IsString,
   IsUUID,
   Length,
+  Max,
   MaxLength,
   Min,
   ValidateNested,
@@ -54,15 +55,21 @@ export class CreateOrderStopDto {
   @MaxLength(80)
   province!: string;
 
-  @ApiProperty({ example: 18.4861 })
+  @ApiPropertyOptional({ example: 18.4861 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  latitude!: number;
+  @Min(-90)
+  @Max(90)
+  latitude?: number;
 
-  @ApiProperty({ example: -69.9312 })
+  @ApiPropertyOptional({ example: -69.9312 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  longitude!: number;
+  @Min(-180)
+  @Max(180)
+  longitude?: number;
 
   @ApiPropertyOptional()
   @IsOptional()

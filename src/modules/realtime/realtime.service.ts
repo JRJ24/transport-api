@@ -133,6 +133,22 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     createdAt: string;
   }): void {
     this.io?.to('tracking:operations').emit('order.created', payload);
+    this.io?.to('drivers:requests').emit('order.created', payload);
+  }
+
+  /** Notifies the assigned driver and TMS when an assignment is created. */
+  emitAssignmentCreated(payload: {
+    assignmentId: string;
+    orderId: string;
+    driverId: string;
+    vehicleId: string;
+    assignmentStatus: string;
+    assignedAt: string;
+  }): void {
+    this.io
+      ?.to(`driver:${payload.driverId}`)
+      .emit('assignment.created', payload);
+    this.io?.to('tracking:operations').emit('assignment.created', payload);
   }
 
   /** Broadcasts a new incident to operators watching the control tower. */
@@ -189,6 +205,7 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       });
       if (driver) {
         void socket.join(`driver:${driver.id}`);
+        void socket.join('drivers:requests');
       }
     }
 

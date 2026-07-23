@@ -9,7 +9,7 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { Catalog } from '@generated/prisma/client';
+import type { Catalog, Municipality, Province } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import { Roles } from '@/common/decorators/roles.decorator';
 import { CatalogQueryDto } from './dto/catalog-query.dto';
@@ -28,6 +28,22 @@ export class CatalogsController {
   @Get()
   list(@Query() query: CatalogQueryDto): Promise<Catalog[]> {
     return this.service.list(query);
+  }
+
+  @ApiOperation({ summary: 'List Dominican Republic provinces' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
+  @Get('provinces')
+  listProvinces(): Promise<Province[]> {
+    return this.service.listProvinces();
+  }
+
+  @ApiOperation({ summary: 'List municipalities by province' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
+  @Get('provinces/:provinceId/municipalities')
+  listMunicipalities(
+    @Param('provinceId', ParseUUIDPipe) provinceId: string,
+  ): Promise<Municipality[]> {
+    return this.service.listMunicipalities(provinceId);
   }
 
   @ApiOperation({ summary: 'Create catalog item' })

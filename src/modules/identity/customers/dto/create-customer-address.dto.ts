@@ -44,19 +44,21 @@ export class CreateCustomerAddressDto {
   @MaxLength(80)
   province!: string;
 
-  @ApiProperty({ example: 18.4861 })
+  @ApiPropertyOptional({ example: 18.4861 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(-90)
   @Max(90)
-  latitude!: number;
+  latitude?: number;
 
-  @ApiProperty({ example: -69.9312 })
+  @ApiPropertyOptional({ example: -69.9312 })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(-180)
   @Max(180)
-  longitude!: number;
+  longitude?: number;
 
   @ApiPropertyOptional({ default: false })
   @IsOptional()

@@ -1,11 +1,10 @@
-
-
 import 'dotenv/config';
 
 import * as bcrypt from 'bcrypt';
 import { PrismaPg } from '@prisma/adapter-pg';
 import { PrismaClient } from '../src/generated/prisma/client';
 import { ROLES, SYSTEM_VALUE } from '../src/generated/prisma/enums';
+import { DOMINICAN_TERRITORIES, territoryCode } from './dominican-territories';
 
 const connectionString = process.env.DATABASE_URL;
 
@@ -254,6 +253,50 @@ async function main(): Promise<void> {
     }
   }
   console.log(`Seeded ${CATALOG_SEED.length} catalog items`);
+
+  for (let provinceIndex = 0; provinceIndex < DOMINICAN_TERRITORIES.length; provinceIndex += 1) {
+    const territory = DOMINICAN_TERRITORIES[provinceIndex];
+    const province = await prisma.province.upsert({
+      where: { code: territory.code },
+      update: {
+        name: territory.name,
+        sortOrder: provinceIndex + 1,
+        isActive: true,
+      },
+      create: {
+        code: territory.code,
+        name: territory.name,
+        sortOrder: provinceIndex + 1,
+        isActive: true,
+      },
+    });
+
+    for (let municipalityIndex = 0; municipalityIndex < territory.municipalities.length; municipalityIndex += 1) {
+      const municipalityName = territory.municipalities[municipalityIndex];
+      const code = territoryCode(municipalityName);
+      await prisma.municipality.upsert({
+        where: {
+          provinceId_code: {
+            provinceId: province.id,
+            code,
+          },
+        },
+        update: {
+          name: municipalityName,
+          sortOrder: municipalityIndex + 1,
+          isActive: true,
+        },
+        create: {
+          provinceId: province.id,
+          code,
+          name: municipalityName,
+          sortOrder: municipalityIndex + 1,
+          isActive: true,
+        },
+      });
+    }
+  }
+  console.log(`Seeded ${DOMINICAN_TERRITORIES.length} provinces and municipalities`);
 
   await prisma.systemParameter.upsert({
     where: { key: 'tax.rate' },

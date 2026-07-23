@@ -19,6 +19,7 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { CustomersService } from './customers.service';
 import { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
+import { CreateTmsCustomerDto } from './dto/create-tms-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
 import { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
 import { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
@@ -41,6 +42,16 @@ export class CustomersController {
   @Get()
   list(@Query() query: CustomerQueryDto): Promise<unknown[]> {
     return this.customersService.list(query);
+  }
+
+  @ApiOperation({ summary: 'Create a customer profile quickly from TMS' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Post('tms')
+  createFromTms(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: CreateTmsCustomerDto,
+  ): Promise<unknown> {
+    return this.customersService.createFromTms(user.id, dto);
   }
 
   @ApiOperation({ summary: 'Get my customer profile' })

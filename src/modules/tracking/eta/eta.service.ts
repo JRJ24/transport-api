@@ -36,11 +36,13 @@ export class EtaService {
         )
       : 0;
 
+    const estimatedDurationMin = order.estimatedDurationMin ?? 0;
+
     return {
       orderId,
-      estimatedDurationMin: order.estimatedDurationMin,
+      estimatedDurationMin,
       elapsedMin,
-      remainingMin: Math.max(order.estimatedDurationMin - elapsedMin, 0),
+      remainingMin: Math.max(estimatedDurationMin - elapsedMin, 0),
       lastLocationAt: tracking?.lastLocationAt ?? null,
       provider: 'internal-mock',
     };

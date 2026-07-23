@@ -13,6 +13,8 @@ import {
   RESERVATIONS_STATUS,
   ROLES,
   SERVICE_TYPE,
+  STATUS_ACCOUNT,
+  STATUS_DRIVER,
   STATUS_ORDERS,
   STOP_TYPE,
 } from '@generated/prisma/enums';
@@ -25,9 +27,17 @@ import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { AssignmentsService } from '@/modules/operations/assignments/assignments.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import type { NotificationEvent } from '@/modules/support/notifications/templates/notification.templates';
+import {
+  PricingService,
+  type ManualQuoteInput,
+} from '../pricing/pricing.service';
+import type { CreateOrderManualQuoteDto } from '../pricing/dto/manual-quote.dto';
 import type { CancelOrderDto } from './dto/cancel-order.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
-import type { CreateTmsOrderDto } from './dto/create-tms-order.dto';
+import {
+  TMS_ORDER_SUBMIT_MODE,
+  type CreateTmsOrderDto,
+} from './dto/create-tms-order.dto';
 import type { OrderQueryDto } from './dto/order-query.dto';
 import type { UpdateOrderStatusDto } from './dto/update-order-status.dto';
 
@@ -35,8 +45,39 @@ import type { UpdateOrderStatusDto } from './dto/update-order-status.dto';
  * Allowed order-status transitions. Terminal states have no outgoing edges.
  */
 const STATUS_TRANSITIONS: Record<STATUS_ORDERS, STATUS_ORDERS[]> = {
-  [STATUS_ORDERS.DRAFT]: [STATUS_ORDERS.REQUESTED, STATUS_ORDERS.CANCELLED],
-  [STATUS_ORDERS.REQUESTED]: [STATUS_ORDERS.ASSIGNED, STATUS_ORDERS.CANCELLED],
+  [STATUS_ORDERS.DRAFT]: [
+    STATUS_ORDERS.PENDING_QUOTE,
+    STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION,
+    STATUS_ORDERS.REQUESTED,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.PENDING_QUOTE]: [
+    STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION]: [
+    STATUS_ORDERS.PENDING_PAYMENT,
+    STATUS_ORDERS.CONFIRMED,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.PENDING_PAYMENT]: [
+    STATUS_ORDERS.CONFIRMED,
+    STATUS_ORDERS.CANCELLED,
+    STATUS_ORDERS.FAILED,
+  ],
+  [STATUS_ORDERS.CONFIRMED]: [
+    STATUS_ORDERS.ASSIGNING_DRIVER,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.ASSIGNING_DRIVER]: [
+    STATUS_ORDERS.ASSIGNED,
+    STATUS_ORDERS.CANCELLED,
+  ],
+  [STATUS_ORDERS.REQUESTED]: [
+    STATUS_ORDERS.ASSIGNED,
+    STATUS_ORDERS.PENDING_PAYMENT,
+    STATUS_ORDERS.CANCELLED,
+  ],
   [STATUS_ORDERS.ASSIGNED]: [
     STATUS_ORDERS.ACCEPTED,
     STATUS_ORDERS.REQUESTED,
@@ -64,6 +105,13 @@ const DRIVER_TRANSITIONS = new Set<STATUS_ORDERS>([
   STATUS_ORDERS.FAILED,
 ]);
 
+const MANUAL_QUOTE_STATUSES = new Set<STATUS_ORDERS>([
+  STATUS_ORDERS.DRAFT,
+  STATUS_ORDERS.PENDING_QUOTE,
+  STATUS_ORDERS.REQUESTED,
+  STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION,
+]);
+
 const SAFE_USER_SELECT = {
   id: true,
   fullName: true,
@@ -86,9 +134,14 @@ const ORDER_INCLUDE = {
     },
   },
   orderEvents: { orderBy: { createdAt: 'asc' as const } },
+  quote: true,
   reservations: true,
   payments: true,
 };
+
+type OrderWithStopsAndItems = Prisma.TransportOrderGetPayload<{
+  include: { orderStops: true; orderItems: true };
+}>;
 
 @Injectable()
 export class OrdersService {
@@ -99,6 +152,7 @@ export class OrdersService {
     private readonly realtime: RealtimeService,
     private readonly assignments: AssignmentsService,
     private readonly notifications: NotificationDispatcherService,
+    private readonly pricing: PricingService,
   ) {}
 
   async create(
@@ -108,6 +162,7 @@ export class OrdersService {
     const customer = await this.getCustomerProfile(user.id);
     const quote = await this.prisma.priceQuote.findFirst({
       where: { id: dto.quoteId, customerId: customer.id },
+      include: { vehicleCategory: true },
     });
 
     if (!quote) {
@@ -130,6 +185,8 @@ export class OrdersService {
         message: 'scheduleAt is required for scheduled orders',
       });
     }
+
+    this.assertVehicleCategoryCapacity(dto, quote.vehicleCategory);
 
     const order = await this.prisma.$transaction(async (tx) => {
       const order = await tx.transportOrder.create({
@@ -155,8 +212,8 @@ export class OrdersService {
               addressLine: stop.addressLine.trim(),
               city: stop.city.trim(),
               province: stop.province.trim(),
-              latitude: stop.latitude,
-              longitude: stop.longitude,
+              latitude: stop.latitude ?? null,
+              longitude: stop.longitude ?? null,
               instructions: stop.instructions?.trim() ?? null,
             })),
           },
@@ -225,7 +282,10 @@ export class OrdersService {
     }
 
     const [customer, vehicleCategory] = await Promise.all([
-      this.prisma.customerProfile.findUnique({ where: { id: dto.customerId } }),
+      this.prisma.customerProfile.findUnique({
+        where: { id: dto.customerId },
+        include: { user: { select: { status: true } } },
+      }),
       this.prisma.vehicleCategory.findUnique({
         where: { id: dto.vehicleCategoryId },
       }),
@@ -238,6 +298,13 @@ export class OrdersService {
       });
     }
 
+    if (customer.user.status !== STATUS_ACCOUNT.ACTIVE) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Customer account is not active',
+      });
+    }
+
     if (!vehicleCategory) {
       throw new NotFoundException({
         code: ERROR_CODES.RESOURCE_NOT_FOUND,
@@ -245,30 +312,50 @@ export class OrdersService {
       });
     }
 
+    this.assertVehicleCategoryCapacity(dto, vehicleCategory);
+
+    const submitMode = dto.submitMode ?? TMS_ORDER_SUBMIT_MODE.DRAFT;
+    const manualQuoteInput =
+      submitMode === TMS_ORDER_SUBMIT_MODE.CREATE_AND_QUOTE && !dto.quoteId
+        ? this.manualQuoteInputForTmsOrder(dto)
+        : null;
+
+    if (
+      submitMode === TMS_ORDER_SUBMIT_MODE.CREATE_AND_QUOTE &&
+      !dto.quoteId &&
+      !manualQuoteInput
+    ) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Manual quote data is required to create and quote an order',
+      });
+    }
+
+    const manualQuoteCalculation = manualQuoteInput
+      ? await this.pricing.calculateManualQuote(user, manualQuoteInput)
+      : null;
+    const hasCalculatedQuote =
+      submitMode === TMS_ORDER_SUBMIT_MODE.CREATE_AND_QUOTE &&
+      (Boolean(dto.quoteId) || Boolean(manualQuoteCalculation));
+    const initialStatus = hasCalculatedQuote
+      ? STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION
+      : STATUS_ORDERS.DRAFT;
+
     const order = await this.prisma.$transaction(async (tx) => {
       const quote = dto.quoteId
         ? await tx.priceQuote.findFirst({
             where: { id: dto.quoteId, customerId: dto.customerId },
           })
-        : await tx.priceQuote.create({
-            data: {
-              customerId: dto.customerId,
-              vehicleCategoryId: dto.vehicleCategoryId,
-              originAddress: this.addressForQuote(dto, STOP_TYPE.PICKUP),
-              destinationAddress: this.addressForQuote(dto, STOP_TYPE.DROPOFF),
-              distanceKm: dto.distanceKm,
-              estimatedDurationMin: Math.round(dto.estimatedDurationMin),
-              baseAmount: dto.totalAmount,
-              extrasAmount: 0,
-              demandAmount: 0,
-              weatherAmount: 0,
-              taxAmount: 0,
-              totalAmount: dto.totalAmount,
-              expiresAt: new Date(Date.now() + 24 * 60 * 60_000),
-            },
-          });
+        : manualQuoteInput && manualQuoteCalculation
+          ? await this.pricing.createManualQuote(
+              user,
+              manualQuoteInput,
+              manualQuoteCalculation,
+              tx,
+            )
+          : null;
 
-      if (!quote) {
+      if (hasCalculatedQuote && !quote) {
         throw new NotFoundException({
           code: ERROR_CODES.RESOURCE_NOT_FOUND,
           message: 'Price quote not found for this customer',
@@ -279,14 +366,18 @@ export class OrdersService {
         data: {
           orderCode: this.generateOrderCode(),
           customerId: dto.customerId,
-          quoteId: quote.id,
+          quoteId: quote?.id ?? null,
           vehicleCategoryId: dto.vehicleCategoryId,
           serviceType: dto.serviceType,
-          status: STATUS_ORDERS.REQUESTED,
+          status: initialStatus,
           scheduleAt: dto.scheduleAt ?? null,
-          distanceKm: dto.distanceKm,
-          estimatedDurationMin: Math.round(dto.estimatedDurationMin),
-          totalAmount: dto.totalAmount,
+          distanceKm: quote?.distanceKm ?? dto.distanceKm ?? null,
+          estimatedDurationMin:
+            quote?.estimatedDurationMin ??
+            (dto.estimatedDurationMin !== undefined
+              ? Math.round(dto.estimatedDurationMin)
+              : null),
+          totalAmount: quote?.totalAmount ?? null,
           paymentStatus: PAYMENT_STATUS.PENDING,
           notes: dto.notes?.trim() ?? '',
           orderStops: {
@@ -298,8 +389,8 @@ export class OrdersService {
               addressLine: stop.addressLine.trim(),
               city: stop.city.trim(),
               province: stop.province.trim(),
-              latitude: stop.latitude,
-              longitude: stop.longitude,
+              latitude: stop.latitude ?? null,
+              longitude: stop.longitude ?? null,
               instructions: stop.instructions?.trim() ?? null,
             })),
           },
@@ -318,10 +409,19 @@ export class OrdersService {
             create: {
               eventType: EVENT_TYPE.CREATED,
               actorUserId: user.id,
-              description: 'Order created from TMS',
-              metadata: { source: 'transport-portal' },
+              description:
+                initialStatus === STATUS_ORDERS.DRAFT
+                  ? 'Draft order created from TMS'
+                  : 'Order created from TMS',
+              metadata:
+                initialStatus === STATUS_ORDERS.DRAFT
+                  ? {
+                      source: 'transport-portal',
+                      draftReason: 'route_or_quote_not_available',
+                    }
+                  : { source: 'transport-portal' },
               latitude: null,
-              longitude: 0,
+              longitude: null,
             },
           },
         },
@@ -343,17 +443,108 @@ export class OrdersService {
         });
       }
 
+      if (quote && !quote.orderId) {
+        await tx.priceQuote.update({
+          where: { id: quote.id },
+          data: { orderId: order.id },
+        });
+      }
+
       return order;
     });
 
     this.emitOrderCreated(order, user.id);
-    void this.notifyOperators('ORDER_CREATED', order).catch((error: unknown) =>
-      this.logger.error(
-        `Failed to notify operators about new TMS order: ${error instanceof Error ? error.message : 'unknown'}`,
-      ),
-    );
+    if (order.status !== STATUS_ORDERS.DRAFT) {
+      void this.notifyOperators('ORDER_CREATED', order).catch(
+        (error: unknown) =>
+          this.logger.error(
+            `Failed to notify operators about new TMS order: ${error instanceof Error ? error.message : 'unknown'}`,
+          ),
+      );
+    }
 
     return order;
+  }
+
+  async createManualQuote(
+    user: AuthenticatedUser,
+    id: string,
+    dto: CreateOrderManualQuoteDto,
+  ): Promise<TransportOrder> {
+    const current = await this.prisma.transportOrder.findUnique({
+      where: { id },
+      include: {
+        orderStops: true,
+        orderItems: true,
+      },
+    });
+
+    if (!current) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Order not found',
+      });
+    }
+
+    if (!MANUAL_QUOTE_STATUSES.has(current.status)) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'This order status does not allow manual quote recalculation',
+      });
+    }
+
+    const manualQuoteInput = this.manualQuoteInputForExistingOrder(
+      current,
+      dto,
+    );
+    const calculation = await this.pricing.calculateManualQuote(
+      user,
+      manualQuoteInput,
+    );
+
+    return this.prisma.$transaction(async (tx) => {
+      await this.pricing.replaceActiveOrderQuotes(id, tx);
+      const quote = await this.pricing.createManualQuote(
+        user,
+        manualQuoteInput,
+        calculation,
+        tx,
+      );
+
+      await tx.transportOrder.update({
+        where: { id },
+        data: {
+          quoteId: quote.id,
+          distanceKm: quote.distanceKm,
+          estimatedDurationMin: quote.estimatedDurationMin,
+          totalAmount: quote.totalAmount,
+          status: this.statusAfterManualQuote(current.status),
+        },
+        include: ORDER_INCLUDE,
+      });
+
+      await tx.orderEvent.create({
+        data: {
+          orderId: id,
+          eventType: EVENT_TYPE.CREATED,
+          actorUserId: user.id,
+          description: 'Manual provisional quote calculated',
+          metadata: {
+            quoteId: quote.id,
+            quoteSource: quote.quoteSource,
+            quoteStatus: quote.quoteStatus,
+            totalAmount: Number(quote.totalAmount),
+          },
+          latitude: null,
+          longitude: null,
+        },
+      });
+
+      return tx.transportOrder.findUniqueOrThrow({
+        where: { id },
+        include: ORDER_INCLUDE,
+      });
+    });
   }
 
   async findAll(
@@ -437,8 +628,38 @@ export class OrdersService {
       where.customerId = customer.id;
     }
 
+    if (this.isDriverOnly(user)) {
+      const driver = await this.prisma.driverProfile.findFirst({
+        where: { userId: user.id },
+        select: { id: true },
+      });
+
+      if (!driver) {
+        return [];
+      }
+
+      where.orderAssignments = { some: { driverId: driver.id } };
+    }
+
     return this.prisma.transportOrder.findMany({
       where,
+      include: ORDER_INCLUDE,
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  findAvailableForDrivers(): Promise<TransportOrder[]> {
+    return this.prisma.transportOrder.findMany({
+      where: {
+        status: STATUS_ORDERS.REQUESTED,
+        orderAssignments: {
+          none: {
+            assignmentStatus: {
+              in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+            },
+          },
+        },
+      },
       include: ORDER_INCLUDE,
       orderBy: { createdAt: 'desc' },
     });
@@ -483,9 +704,12 @@ export class OrdersService {
 
     await this.assertDriverCanAccessOrder(user, id);
     this.assertStatusTransition(user, current.status, dto.status);
+    if (dto.status === STATUS_ORDERS.DELIVERED) {
+      await this.assertDeliveryEvidenceReady(id);
+    }
 
     const order = await this.prisma.$transaction(async (tx) => {
-      const updated = await tx.transportOrder.update({
+      await tx.transportOrder.update({
         where: { id },
         data: {
           status: dto.status,
@@ -507,7 +731,33 @@ export class OrdersService {
         },
       });
 
-      return updated;
+      if (dto.status === STATUS_ORDERS.DELIVERED) {
+        const assignment = await tx.orderAssignment.findFirst({
+          where: {
+            orderId: id,
+            assignmentStatus: {
+              in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+            },
+          },
+          orderBy: { assignedAt: 'desc' },
+        });
+
+        if (assignment) {
+          await tx.orderAssignment.update({
+            where: { id: assignment.id },
+            data: { assignmentStatus: ASSIGNMENT_STATUS.COMPLETED },
+          });
+          await tx.driverProfile.update({
+            where: { id: assignment.driverId },
+            data: { availabilityStatus: STATUS_DRIVER.AVAILABLE },
+          });
+        }
+      }
+
+      return tx.transportOrder.findUniqueOrThrow({
+        where: { id },
+        include: ORDER_INCLUDE,
+      });
     });
 
     this.realtime.emitOrderStatusChanged({
@@ -627,6 +877,45 @@ export class OrdersService {
     });
   }
 
+  private async assertDeliveryEvidenceReady(orderId: string): Promise<void> {
+    const proofs = await this.prisma.deliveryProof.findMany({
+      where: { orderId },
+      select: { id: true },
+    });
+
+    if (proofs.length === 0) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Delivery evidence is required before completing the order',
+      });
+    }
+
+    const proofIds = proofs.map((proof) => proof.id);
+    const [photoAttachment, signature] = await Promise.all([
+      this.prisma.attachment.findFirst({
+        where: {
+          entityType: 'DeliveryProof',
+          entityId: { in: proofIds },
+          mimeType: { startsWith: 'image/' },
+          NOT: { fileName: { contains: 'signature', mode: 'insensitive' } },
+        },
+        select: { id: true },
+      }),
+      this.prisma.signature.findFirst({
+        where: { proofId: { in: proofIds } },
+        select: { id: true },
+      }),
+    ]);
+
+    if (!photoAttachment || !signature) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message:
+          'Delivery photo and recipient signature are required before completing the order',
+      });
+    }
+  }
+
   private async getCustomerProfile(userId: string) {
     const customer = await this.prisma.customerProfile.findFirst({
       where: { userId },
@@ -728,6 +1017,36 @@ export class OrdersService {
     }
   }
 
+  private assertVehicleCategoryCapacity(
+    dto: { items: { weightKg: number; quantity: number; volumeM3?: number }[] },
+    vehicleCategory: { maxWeightKg: unknown; maxVolumenM3: unknown },
+  ): void {
+    const totalWeightKg = dto.items.reduce(
+      (total, item) => total + item.weightKg * item.quantity,
+      0,
+    );
+    const totalVolumeM3 = dto.items.reduce(
+      (total, item) => total + (item.volumeM3 ?? 0) * item.quantity,
+      0,
+    );
+    const maxWeightKg = Number(vehicleCategory.maxWeightKg);
+    const maxVolumeM3 = Number(vehicleCategory.maxVolumenM3);
+
+    if (Number.isFinite(maxWeightKg) && totalWeightKg > maxWeightKg) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Cargo weight exceeds the selected vehicle category capacity',
+      });
+    }
+
+    if (Number.isFinite(maxVolumeM3) && totalVolumeM3 > maxVolumeM3) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Cargo volume exceeds the selected vehicle category capacity',
+      });
+    }
+  }
+
   private eventForStatus(status: STATUS_ORDERS): EVENT_TYPE {
     switch (status) {
       case STATUS_ORDERS.ASSIGNED:
@@ -795,10 +1114,91 @@ export class OrdersService {
   private addressForQuote(dto: CreateTmsOrderDto, stopType: STOP_TYPE): string {
     const stop =
       dto.stops.find((candidate) => candidate.stopType === stopType) ??
-      dto.stops.sort((left, right) => left.sequence - right.sequence)[
+      [...dto.stops].sort((left, right) => left.sequence - right.sequence)[
         stopType === STOP_TYPE.PICKUP ? 0 : dto.stops.length - 1
       ];
 
     return stop?.addressLine.trim() ?? 'TMS order address';
+  }
+
+  private manualQuoteInputForTmsOrder(
+    dto: CreateTmsOrderDto,
+  ): ManualQuoteInput | null {
+    if (!dto.manualQuote) {
+      return null;
+    }
+
+    return {
+      customerId: dto.customerId,
+      vehicleCategoryId: dto.vehicleCategoryId,
+      originAddress: this.addressForQuote(dto, STOP_TYPE.PICKUP),
+      destinationAddress: this.addressForQuote(dto, STOP_TYPE.DROPOFF),
+      distanceKm: dto.manualQuote.distanceKm,
+      estimatedDurationMin: dto.manualQuote.estimatedDurationMin,
+      helperRequired:
+        dto.manualQuote.helperRequired ??
+        dto.items.some((item) => item.requireHelper === true),
+      tollAmount: dto.manualQuote.tollAmount,
+      weightSurcharge: dto.manualQuote.weightSurcharge,
+      volumeSurcharge: dto.manualQuote.volumeSurcharge,
+      otherCharges: dto.manualQuote.otherCharges,
+      discountAmount: dto.manualQuote.discountAmount,
+      manualAdjustmentAmount: dto.manualQuote.manualAdjustmentAmount,
+      adjustmentReason: dto.manualQuote.adjustmentReason,
+    };
+  }
+
+  private manualQuoteInputForExistingOrder(
+    order: OrderWithStopsAndItems,
+    dto: CreateOrderManualQuoteDto,
+  ): ManualQuoteInput {
+    return {
+      customerId: order.customerId,
+      orderId: order.id,
+      vehicleCategoryId: order.vehicleCategoryId,
+      originAddress: this.addressForStoredStops(order, STOP_TYPE.PICKUP),
+      destinationAddress: this.addressForStoredStops(order, STOP_TYPE.DROPOFF),
+      distanceKm: dto.distanceKm,
+      estimatedDurationMin: dto.estimatedDurationMin,
+      helperRequired:
+        dto.helperRequired ??
+        order.orderItems.some((item) => item.requireHelper === true),
+      tollAmount: dto.tollAmount,
+      weightSurcharge: dto.weightSurcharge,
+      volumeSurcharge: dto.volumeSurcharge,
+      otherCharges: dto.otherCharges,
+      discountAmount: dto.discountAmount,
+      manualAdjustmentAmount: dto.manualAdjustmentAmount,
+      adjustmentReason: dto.adjustmentReason,
+    };
+  }
+
+  private addressForStoredStops(
+    order: OrderWithStopsAndItems,
+    stopType: STOP_TYPE,
+  ): string {
+    const orderedStops = [...order.orderStops].sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+    const stop =
+      orderedStops.find((candidate) => candidate.stopType === stopType) ??
+      orderedStops[stopType === STOP_TYPE.PICKUP ? 0 : orderedStops.length - 1];
+
+    if (!stop) {
+      return 'TMS order address';
+    }
+
+    return [stop.addressLine, stop.city, stop.province]
+      .map((part) => part.trim())
+      .filter(Boolean)
+      .join(', ');
+  }
+
+  private statusAfterManualQuote(current: STATUS_ORDERS): STATUS_ORDERS {
+    if (current === STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION) {
+      return current;
+    }
+
+    return STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION;
   }
 }

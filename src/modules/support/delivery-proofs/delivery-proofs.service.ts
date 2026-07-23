@@ -1,10 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
 import type {
   DeliveryProof,
   Prisma,
   Signature,
 } from '@generated/prisma/client';
-import { VALIDATION } from '@generated/prisma/enums';
+import { ROLES, VALIDATION } from '@generated/prisma/enums';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
 import type { DeliveryProofQueryDto } from './dto/delivery-proof-query.dto';
@@ -60,6 +61,15 @@ export class DeliveryProofsService {
     user: AuthenticatedUser,
     dto: CreateDeliveryProofDto,
   ): Promise<DeliveryProof> {
+    return this.createAuthorized(user, dto);
+  }
+
+  private async createAuthorized(
+    user: AuthenticatedUser,
+    dto: CreateDeliveryProofDto,
+  ): Promise<DeliveryProof> {
+    await this.assertDriverAssignedToOrder(user, dto.orderId);
+
     return this.prisma.deliveryProof.create({
       data: {
         orderId: dto.orderId,
@@ -83,7 +93,25 @@ export class DeliveryProofsService {
     });
   }
 
-  addSignature(proofId: string, dto: CreateSignatureDto): Promise<Signature> {
+  async addSignature(
+    user: AuthenticatedUser,
+    proofId: string,
+    dto: CreateSignatureDto,
+  ): Promise<Signature> {
+    const proof = await this.prisma.deliveryProof.findUnique({
+      where: { id: proofId },
+      select: { orderId: true },
+    });
+
+    if (!proof) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Delivery proof not found',
+      });
+    }
+
+    await this.assertDriverAssignedToOrder(user, proof.orderId);
+
     return this.prisma.signature.create({
       data: {
         proofId,
@@ -91,5 +119,38 @@ export class DeliveryProofsService {
         signerName: dto.signerName.trim(),
       },
     });
+  }
+
+  private async assertDriverAssignedToOrder(
+    user: AuthenticatedUser,
+    orderId: string,
+  ): Promise<void> {
+    if (user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)) {
+      return;
+    }
+
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { userId: user.id },
+      select: { id: true },
+    });
+
+    if (!driver) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Driver profile not found',
+      });
+    }
+
+    const assignment = await this.prisma.orderAssignment.findFirst({
+      where: { orderId, driverId: driver.id },
+      select: { id: true },
+    });
+
+    if (!assignment) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'You cannot create evidence for an unassigned order',
+      });
+    }
   }
 }

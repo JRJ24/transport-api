@@ -97,6 +97,11 @@ enum SERVICE_TYPE {
 
 enum STATUS_ORDERS {
   DRAFT
+  PENDING_QUOTE
+  PENDING_CUSTOMER_CONFIRMATION
+  PENDING_PAYMENT
+  CONFIRMED
+  ASSIGNING_DRIVER
   REQUESTED
   ASSIGNED
   ACCEPTED
@@ -106,6 +111,26 @@ enum STATUS_ORDERS {
   FAILED
 
   @@schema("ORDERS")
+}
+
+enum QUOTE_SOURCE {
+  MANUAL
+  GOOGLE_MAPS
+
+  @@schema("PRICES")
+}
+
+enum QUOTE_STATUS {
+  DRAFT
+  PROVISIONAL
+  CALCULATED
+  SENT
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  REPLACED
+
+  @@schema("PRICES")
 }
 
 enum PAYMENT_STATUS {
@@ -414,8 +439,8 @@ model CustomerAddress {
   addressesLine String   @map("addresses_line")
   city          String
   province      String
-  latitude      Decimal
-  longitude     Decimal
+  latitude      Decimal?
+  longitude     Decimal?
   isDefault     Boolean  @map("is_default")
   createdAt     DateTime @map("created_at")
 
@@ -553,6 +578,7 @@ model RateRule {
 model PriceQuote {
   id                   String   @id @default(uuid())
   customerId           String   @map("customer_id")
+  orderId              String?  @map("order_id")
   vehicleCategoryId    String   @map("vehicle_category_id")
   originAddress        String   @map("origin_address")
   destinationAddress   String   @map("destination_address")
@@ -564,13 +590,22 @@ model PriceQuote {
   weatherAmount        Decimal  @map("weather_amount")
   taxAmount            Decimal  @map("tax_amount")
   totalAmount          Decimal  @map("total_amount")
+  quoteSource          QUOTE_SOURCE @default(MANUAL) @map("quote_source")
+  quoteStatus          QUOTE_STATUS @default(PROVISIONAL) @map("quote_status")
+  breakdown            Json?
+  manualAdjustmentAmount Decimal @default(0) @map("manual_adjustment_amount")
+  adjustmentReason     String?  @map("adjustment_reason")
+  adjustedBy           String?  @map("adjusted_by")
   expiresAt            DateTime @map("expires_at")
   createdAt            DateTime @default(now()) @map("created_at")
 
   customer        CustomerProfile  @relation("CUSTOMER_PRICE", fields: [customerId], references: [id])
+  order           TransportOrder?  @relation("ORDER_PRICE_QUOTES", fields: [orderId], references: [id])
   vehicleCategory VehicleCategory  @relation("VEHICLECATEGORY_PRICE", fields: [vehicleCategoryId], references: [id])
   transportOrders TransportOrder[] @relation("PRICE_TRANSPORT")
 
+  @@index([orderId])
+  @@index([quoteStatus])
   @@map("price_quotes")
   @@schema("PRICES")
 }
@@ -579,23 +614,24 @@ model TransportOrder {
   id                   String         @id @default(uuid())
   orderCode            String         @unique @map("order_code")
   customerId           String         @map("customer_id")
-  quoteId              String         @map("quotes_id")
+  quoteId              String?        @map("quotes_id")
   vehicleCategoryId    String         @map("vehicle_category_id")
   serviceType          SERVICE_TYPE
   status               STATUS_ORDERS
   scheduleAt           DateTime?      @map("schedule_at")
   pickupAt             DateTime?      @map("pickup_at")
   deliveredAt          DateTime?      @map("delivered_at")
-  distanceKm           Decimal        @map("distance_km")
-  estimatedDurationMin Int            @map("estimated_duration_min")
-  totalAmount          Decimal        @map("total_amout")
+  distanceKm           Decimal?       @map("distance_km")
+  estimatedDurationMin Int?           @map("estimated_duration_min")
+  totalAmount          Decimal?       @map("total_amout")
   paymentStatus        PAYMENT_STATUS
   notes                String
   createdAt            DateTime       @default(now()) @map("created_at")
   updatedAt            DateTime       @updatedAt @map("update_at")
 
   customer           CustomerProfile     @relation("CUSTOMER_TRANSPORT", fields: [customerId], references: [id])
-  quote              PriceQuote          @relation("PRICE_TRANSPORT", fields: [quoteId], references: [id])
+  quote              PriceQuote?         @relation("PRICE_TRANSPORT", fields: [quoteId], references: [id])
+  priceQuotes        PriceQuote[]        @relation("ORDER_PRICE_QUOTES")
   vehicleCategory    VehicleCategory     @relation("VEHICLECATEGORY_TRANSPORT", fields: [vehicleCategoryId], references: [id])
   orderItems         OrderItem[]         @relation("ORDERITEMS_TRANSPORTORDER")
   orderAssignments   OrderAssignment[]   @relation("ORDERASSIGNMENTS_TRANSPORTORDER")
@@ -628,8 +664,8 @@ model OrderStop {
   addressLine  String    @map("address_line")
   city         String
   province     String
-  latitude     Decimal   @db.Decimal(9, 6)
-  longitude    Decimal   @db.Decimal(9, 6)
+  latitude     Decimal?  @db.Decimal(9, 6)
+  longitude    Decimal?  @db.Decimal(9, 6)
   instructions String?
   arrivedAt    DateTime? @map("arrived_at")
   completedAt  DateTime? @map("completed_at")
@@ -1010,6 +1046,40 @@ model Catalog {
 
   @@index([code])
   @@map("catalogs")
+  @@schema("ADMINISTRATION")
+}
+
+model Province {
+  id             String         @id @default(uuid())
+  code           String         @unique
+  name           String
+  sortOrder      Int            @map("sort_order")
+  isActive       Boolean        @default(true) @map("is_active")
+  createdAt      DateTime       @default(now()) @map("created_at")
+  updatedAt      DateTime       @updatedAt @map("updated_at")
+  municipalities Municipality[] @relation("PROVINCE_MUNICIPALITIES")
+
+  @@index([name])
+  @@map("provinces")
+  @@schema("ADMINISTRATION")
+}
+
+model Municipality {
+  id         String   @id @default(uuid())
+  provinceId String   @map("province_id")
+  code       String
+  name       String
+  sortOrder  Int      @map("sort_order")
+  isActive   Boolean  @default(true) @map("is_active")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+
+  province Province @relation("PROVINCE_MUNICIPALITIES", fields: [provinceId], references: [id])
+
+  @@unique([provinceId, code])
+  @@index([provinceId])
+  @@index([name])
+  @@map("municipalities")
   @@schema("ADMINISTRATION")
 }
 

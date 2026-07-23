@@ -1,10 +1,11 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import type {
   Incident,
   IncidentComment,
   Prisma,
 } from '@generated/prisma/client';
 import { INCIDENT_STATUS, ROLES } from '@generated/prisma/enums';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
@@ -66,6 +67,8 @@ export class IncidentsService {
     user: AuthenticatedUser,
     dto: CreateIncidentDto,
   ): Promise<Incident> {
+    await this.assertCanReportOrder(user, dto.orderId);
+
     const incident = await this.prisma.incident.create({
       data: {
         orderId: dto.orderId,
@@ -141,6 +144,60 @@ export class IncidentsService {
         userId: user.id,
         comment: dto.comment.trim(),
       },
+    });
+  }
+
+  private async assertCanReportOrder(
+    user: AuthenticatedUser,
+    orderId: string,
+  ): Promise<void> {
+    if (user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)) {
+      return;
+    }
+
+    if (user.roles.includes(ROLES.DRIVER)) {
+      const driver = await this.prisma.driverProfile.findFirst({
+        where: { userId: user.id },
+        select: { id: true },
+      });
+      const assignment = driver
+        ? await this.prisma.orderAssignment.findFirst({
+            where: { orderId, driverId: driver.id },
+            select: { id: true },
+          })
+        : null;
+
+      if (assignment) {
+        return;
+      }
+
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'You cannot report incidents for an unassigned order',
+      });
+    }
+
+    if (user.roles.includes(ROLES.CUSTOMER)) {
+      const order = await this.prisma.transportOrder.findUnique({
+        where: { id: orderId },
+        select: { customer: { select: { userId: true } } },
+      });
+
+      if (!order) {
+        throw new NotFoundException({
+          code: ERROR_CODES.RESOURCE_NOT_FOUND,
+          message: 'Order not found',
+        });
+      }
+
+      if (order.customer.userId === user.id) {
+        return;
+      }
+    }
+
+    throw new ForbiddenException({
+      code: ERROR_CODES.FORBIDDEN,
+      message: 'You cannot report incidents for this order',
     });
   }
 

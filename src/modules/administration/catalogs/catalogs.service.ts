@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { Catalog, Prisma } from '@generated/prisma/client';
+import type { Catalog, Municipality, Prisma, Province } from '@generated/prisma/client';
 import { PrismaService } from '@/database/prisma.service';
 import type { CatalogQueryDto } from './dto/catalog-query.dto';
 import type { CreateCatalogDto } from './dto/create-catalog.dto';
@@ -55,6 +55,20 @@ export class CatalogsService {
         ...(dto.sortOrder !== undefined && { sortOrder: dto.sortOrder }),
         ...(dto.isActive !== undefined && { isActive: dto.isActive }),
       },
+    });
+  }
+
+  listProvinces(): Promise<Province[]> {
+    return this.prisma.province.findMany({
+      where: { isActive: true },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
+    });
+  }
+
+  listMunicipalities(provinceId: string): Promise<Municipality[]> {
+    return this.prisma.municipality.findMany({
+      where: { provinceId, isActive: true, province: { isActive: true } },
+      orderBy: [{ sortOrder: 'asc' }, { name: 'asc' }],
     });
   }
 }
