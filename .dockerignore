@@ -1,0 +1,17 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+dist
+build
+coverage
+logs
+*.log
+.DS_Store
+.idea
+.vscode
+.temp
+.tmp
+src/generated/prisma
+tsconfig.tsbuildinfo
