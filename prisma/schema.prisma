@@ -135,10 +135,13 @@ enum QUOTE_STATUS {
 
 enum PAYMENT_STATUS {
   PENDING
+  PROCESSING
   AUTHORIZED
   PAID
   REFUNDED
   FAILED
+  CANCELLED
+  EXPIRED
 
   @@schema("PAIDS")
 }
@@ -439,6 +442,8 @@ model CustomerAddress {
   addressesLine String   @map("addresses_line")
   city          String
   province      String
+  countryCode   String?  @map("country_code")
+  postalCode    String?  @map("postal_code")
   latitude      Decimal?
   longitude     Decimal?
   isDefault     Boolean  @map("is_default")
@@ -576,28 +581,28 @@ model RateRule {
 }
 
 model PriceQuote {
-  id                   String   @id @default(uuid())
-  customerId           String   @map("customer_id")
-  orderId              String?  @map("order_id")
-  vehicleCategoryId    String   @map("vehicle_category_id")
-  originAddress        String   @map("origin_address")
-  destinationAddress   String   @map("destination_address")
-  distanceKm           Decimal  @map("distance_km")
-  estimatedDurationMin Int      @map("estimated_duration_min")
-  baseAmount           Decimal  @map("base_amount")
-  extrasAmount         Decimal  @map("extras_amount")
-  demandAmount         Decimal  @map("demand_amount")
-  weatherAmount        Decimal  @map("weather_amount")
-  taxAmount            Decimal  @map("tax_amount")
-  totalAmount          Decimal  @map("total_amount")
-  quoteSource          QUOTE_SOURCE @default(MANUAL) @map("quote_source")
-  quoteStatus          QUOTE_STATUS @default(PROVISIONAL) @map("quote_status")
-  breakdown            Json?
-  manualAdjustmentAmount Decimal @default(0) @map("manual_adjustment_amount")
-  adjustmentReason     String?  @map("adjustment_reason")
-  adjustedBy           String?  @map("adjusted_by")
-  expiresAt            DateTime @map("expires_at")
-  createdAt            DateTime @default(now()) @map("created_at")
+  id                     String       @id @default(uuid())
+  customerId             String       @map("customer_id")
+  orderId                String?      @map("order_id")
+  vehicleCategoryId      String       @map("vehicle_category_id")
+  originAddress          String       @map("origin_address")
+  destinationAddress     String       @map("destination_address")
+  distanceKm             Decimal      @map("distance_km")
+  estimatedDurationMin   Int          @map("estimated_duration_min")
+  baseAmount             Decimal      @map("base_amount")
+  extrasAmount           Decimal      @map("extras_amount")
+  demandAmount           Decimal      @map("demand_amount")
+  weatherAmount          Decimal      @map("weather_amount")
+  taxAmount              Decimal      @map("tax_amount")
+  totalAmount            Decimal      @map("total_amount")
+  quoteSource            QUOTE_SOURCE @default(MANUAL) @map("quote_source")
+  quoteStatus            QUOTE_STATUS @default(PROVISIONAL) @map("quote_status")
+  breakdown              Json?
+  manualAdjustmentAmount Decimal      @default(0) @map("manual_adjustment_amount")
+  adjustmentReason       String?      @map("adjustment_reason")
+  adjustedBy             String?      @map("adjusted_by")
+  expiresAt              DateTime     @map("expires_at")
+  createdAt              DateTime     @default(now()) @map("created_at")
 
   customer        CustomerProfile  @relation("CUSTOMER_PRICE", fields: [customerId], references: [id])
   order           TransportOrder?  @relation("ORDER_PRICE_QUOTES", fields: [orderId], references: [id])
@@ -919,23 +924,39 @@ model IncidentComment {
 }
 
 model Payment {
-  id                String         @id @default(uuid())
-  orderId           String         @map("order_id")
-  customerId        String         @map("customer_id")
-  amount            Decimal
-  currency          String
-  paymentMethod     PAYMENT_METHOD @map("payment_method")
-  paymentProvider   String?        @map("payment_provider")
-  status            PAYMENT_STATUS
-  providerReference String?
-  paidAt            DateTime?      @map("paid_at")
-  createdAt         DateTime       @default(now()) @map("created_at")
+  id                       String         @id @default(uuid())
+  orderId                  String         @map("order_id")
+  customerId               String         @map("customer_id")
+  amount                   Decimal
+  currency                 String
+  paymentMethod            PAYMENT_METHOD @map("payment_method")
+  paymentProvider          String?        @map("payment_provider")
+  status                   PAYMENT_STATUS
+  providerReference        String?
+  transactionId            String?        @map("transaction_id")
+  providerSessionId        String?        @unique @map("provider_session_id")
+  providerSessionKey       String?        @map("provider_session_key")
+  responseCode             String?        @map("response_code")
+  remoteResponseCode       String?        @map("remote_response_code")
+  authorizationCode        String?        @map("authorization_code")
+  retrievalReferenceNumber String?        @map("retrieval_reference_number")
+  transactionToken         String?        @map("transaction_token")
+  maskedCardNumber         String?        @map("masked_card_number")
+  sessionCreatedAt         DateTime?      @map("session_created_at")
+  verifiedAt               DateTime?      @map("verified_at")
+  expiresAt                DateTime?      @map("expires_at")
+  paidAt                   DateTime?      @map("paid_at")
+  createdAt                DateTime       @default(now()) @map("created_at")
+  updatedAt                DateTime       @updatedAt @map("updated_at")
 
   order                TransportOrder       @relation("ORDERS_PAYMENTS", fields: [orderId], references: [id])
   customer             CustomerProfile      @relation("CUSTOMER_PAYMENTS", fields: [customerId], references: [id])
   paymentsTransactions PaymentTransaction[] @relation("PAYMENTS_TRANSACTIONS")
   refunds              Refund[]             @relation("PAYMENT_REFUNDS")
 
+  @@unique([paymentProvider, transactionId])
+  @@index([orderId])
+  @@index([status, createdAt])
   @@map("payments")
   @@schema("PAIDS")
 }

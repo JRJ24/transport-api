@@ -8,6 +8,7 @@ import type { OrderAssignment, Prisma } from '@generated/prisma/client';
 import {
   ASSIGNMENT_STATUS,
   EVENT_TYPE,
+  PAYMENT_STATUS,
   ROLES,
   STATUS_DRIVER,
   STATUS_ORDERS,
@@ -105,8 +106,25 @@ export class AssignmentsService {
   ): Promise<OrderAssignment> {
     const currentOrder = await this.prisma.transportOrder.findUnique({
       where: { id: dto.orderId },
-      select: { status: true },
+      select: { status: true, paymentStatus: true },
     });
+
+    if (!currentOrder) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Order not found',
+      });
+    }
+
+    if (
+      currentOrder.status !== STATUS_ORDERS.REQUESTED ||
+      currentOrder.paymentStatus !== PAYMENT_STATUS.PAID
+    ) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'Order must be paid before assignment',
+      });
+    }
 
     const assignment = await this.prisma.$transaction(async (tx) => {
       const created = await tx.orderAssignment.create({

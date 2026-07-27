@@ -20,6 +20,8 @@ export interface CustomerAddressResponse {
   addressLine: string;
   city: string;
   province: string;
+  countryCode: string | null;
+  postalCode: string | null;
   latitude: number | null;
   longitude: number | null;
   isDefault: boolean;
@@ -49,6 +51,8 @@ export function toCustomerAddressResponse(
     addressLine: address.addressesLine,
     city: address.city,
     province: address.province,
+    countryCode: address.countryCode,
+    postalCode: address.postalCode,
     latitude: address.latitude === null ? null : Number(address.latitude),
     longitude: address.longitude === null ? null : Number(address.longitude),
     isDefault: address.isDefault,

@@ -286,6 +286,8 @@ export class CustomersService {
           addressesLine: dto.addressLine.trim(),
           city: dto.city.trim(),
           province: dto.province.trim(),
+          countryCode: this.optionalString(dto.countryCode),
+          postalCode: this.optionalString(dto.postalCode),
           latitude: dto.latitude ?? null,
           longitude: dto.longitude ?? null,
           isDefault: shouldSetDefault,
@@ -331,6 +333,12 @@ export class CustomersService {
           ...(dto.city !== undefined && { city: dto.city.trim() }),
           ...(dto.province !== undefined && {
             province: dto.province.trim(),
+          }),
+          ...(dto.countryCode !== undefined && {
+            countryCode: this.optionalString(dto.countryCode),
+          }),
+          ...(dto.postalCode !== undefined && {
+            postalCode: this.optionalString(dto.postalCode),
           }),
           ...(dto.latitude !== undefined && { latitude: dto.latitude }),
           ...(dto.longitude !== undefined && { longitude: dto.longitude }),

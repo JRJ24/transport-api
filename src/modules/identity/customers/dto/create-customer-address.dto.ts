@@ -44,6 +44,24 @@ export class CreateCustomerAddressDto {
   @MaxLength(80)
   province!: string;
 
+  @ApiPropertyOptional({ example: 'DOP' })
+  @IsOptional()
+  @Transform(({ value }): unknown =>
+    typeof value === 'string' ? value.trim().toUpperCase() : value,
+  )
+  @IsString()
+  @MaxLength(3)
+  countryCode?: string;
+
+  @ApiPropertyOptional({ example: '11510' })
+  @IsOptional()
+  @Transform(({ value }): unknown =>
+    typeof value === 'string' ? value.trim() : value,
+  )
+  @IsString()
+  @MaxLength(16)
+  postalCode?: string;
+
   @ApiPropertyOptional({ example: 18.4861 })
   @IsOptional()
   @Type(() => Number)

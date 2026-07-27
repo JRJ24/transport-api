@@ -61,6 +61,7 @@ const STATUS_TRANSITIONS: Record<STATUS_ORDERS, STATUS_ORDERS[]> = {
     STATUS_ORDERS.CANCELLED,
   ],
   [STATUS_ORDERS.PENDING_PAYMENT]: [
+    STATUS_ORDERS.REQUESTED,
     STATUS_ORDERS.CONFIRMED,
     STATUS_ORDERS.CANCELLED,
     STATUS_ORDERS.FAILED,
@@ -136,7 +137,12 @@ const ORDER_INCLUDE = {
   orderEvents: { orderBy: { createdAt: 'asc' as const } },
   quote: true,
   reservations: true,
-  payments: true,
+  payments: {
+    include: {
+      paymentsTransactions: { orderBy: { createdAt: 'desc' as const } },
+    },
+    orderBy: { createdAt: 'desc' as const },
+  },
 };
 
 type OrderWithStopsAndItems = Prisma.TransportOrderGetPayload<{
@@ -196,7 +202,7 @@ export class OrdersService {
           quoteId: quote.id,
           vehicleCategoryId: quote.vehicleCategoryId,
           serviceType: dto.serviceType,
-          status: STATUS_ORDERS.REQUESTED,
+          status: STATUS_ORDERS.PENDING_PAYMENT,
           scheduleAt: dto.scheduleAt ?? null,
           distanceKm: quote.distanceKm,
           estimatedDurationMin: quote.estimatedDurationMin,
@@ -652,6 +658,7 @@ export class OrdersService {
     return this.prisma.transportOrder.findMany({
       where: {
         status: STATUS_ORDERS.REQUESTED,
+        paymentStatus: PAYMENT_STATUS.PAID,
         orderAssignments: {
           none: {
             assignmentStatus: {
