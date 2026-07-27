@@ -8,6 +8,7 @@ import { LoggerModule } from 'nestjs-pino';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
 import { PrismaExceptionFilter } from './common/filters/prisma-exception.filter';
 import { AccountStatusGuard } from './common/guards/account-status.guard';
+import { DriverVerificationGuard } from './common/guards/driver-verification.guard';
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
 import { RolesGuard } from './common/guards/roles.guard';
@@ -90,6 +91,7 @@ import { TransportModule } from './modules/transport/transport.module';
     { provide: APP_GUARD, useClass: ThrottlerGuard },
     { provide: APP_GUARD, useClass: JwtAuthGuard },
     { provide: APP_GUARD, useClass: AccountStatusGuard },
+    { provide: APP_GUARD, useClass: DriverVerificationGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
     { provide: APP_GUARD, useClass: PermissionsGuard },
     // Catch-all first; the Prisma filter (more specific) wins when it matches.

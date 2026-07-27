@@ -11,6 +11,7 @@ import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
+import { AllowUnverifiedDriver } from '@/common/decorators/allow-unverified-driver.decorator';
 import { Public } from '@/common/decorators/public.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { extractRequestContext } from '@/common/utils/request.util';
@@ -66,6 +67,7 @@ export class AuthController {
     summary: 'Log out this device (revokes the current session)',
   })
   @ApiBearerAuth()
+  @AllowUnverifiedDriver()
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
   async logout(
@@ -77,6 +79,7 @@ export class AuthController {
 
   @ApiOperation({ summary: 'Log out every device (revokes all sessions)' })
   @ApiBearerAuth()
+  @AllowUnverifiedDriver()
   @Post('logout-all')
   @HttpCode(HttpStatus.OK)
   logoutAll(
@@ -88,6 +91,7 @@ export class AuthController {
 
   @ApiOperation({ summary: 'Get the authenticated principal' })
   @ApiBearerAuth()
+  @AllowUnverifiedDriver()
   @Get('me')
   me(@CurrentUser() user: AuthenticatedUser): AuthenticatedUser {
     return user;

@@ -2,6 +2,8 @@ import {
   Body,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -9,13 +11,17 @@ import {
   Query,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { DriverProfile } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
+import { AllowUnverifiedDriver } from '@/common/decorators/allow-unverified-driver.decorator';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
+import { Public } from '@/common/decorators/public.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CreateDriverDto } from './dto/create-driver.dto';
 import { DriverQueryDto } from './dto/driver-query.dto';
+import { RegisterDriverDto } from './dto/register-driver.dto';
 import { UpdateDriverStatusDto } from './dto/update-driver-status.dto';
 import { UpdateDriverVerificationDto } from './dto/update-driver-verification.dto';
 import { DriversService } from './drivers.service';
@@ -34,12 +40,22 @@ export class DriversController {
   }
 
   @ApiOperation({ summary: 'Get my driver profile' })
+  @AllowUnverifiedDriver()
   @Roles(ROLES.DRIVER)
   @Get('me')
   findMine(
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<DriverProfile | null> {
     return this.service.findMine(user.id);
+  }
+
+  @ApiOperation({ summary: 'Register a new driver for portal approval' })
+  @Public()
+  @Throttle({ default: { limit: 3, ttl: 60_000 } })
+  @Post('onboarding/register')
+  @HttpCode(HttpStatus.CREATED)
+  register(@Body() dto: RegisterDriverDto): Promise<DriverProfile> {
+    return this.service.register(dto);
   }
 
   @ApiOperation({ summary: 'Create a driver profile' })
