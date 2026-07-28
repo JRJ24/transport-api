@@ -85,6 +85,16 @@ export class OrdersController {
     return this.service.accept(user, id);
   }
 
+  @ApiOperation({ summary: 'Confirm a TMS-created quote as the customer' })
+  @Roles(ROLES.CUSTOMER)
+  @Post(':id/customer-confirm')
+  confirmByCustomer(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<TransportOrder> {
+    return this.service.confirmByCustomer(user, id);
+  }
+
   @ApiOperation({ summary: 'Update order status' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.DRIVER)
   @Patch(':id/status')

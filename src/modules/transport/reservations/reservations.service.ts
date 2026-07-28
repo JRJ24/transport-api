@@ -86,22 +86,74 @@ export class ReservationsService {
     });
   }
 
-  reschedule(id: string, dto: RescheduleReservationDto): Promise<Reservation> {
-    return this.prisma.reservation.update({
-      where: { id },
-      data: {
-        reservedFor: dto.reservedFor,
-        reservationStatus: RESERVATIONS_STATUS.RESCHUDULED,
-        cancellationDeadline: this.cancellationDeadline(dto.reservedFor),
-        rescheduleCount: { increment: 1 },
-      },
+  reschedule(
+    id: string,
+    dto: RescheduleReservationDto,
+    actorUserId: string,
+  ): Promise<Reservation> {
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.reservation.findUnique({ where: { id } });
+      const reservation = await tx.reservation.update({
+        where: { id },
+        data: {
+          reservedFor: dto.reservedFor,
+          reservationStatus: RESERVATIONS_STATUS.RESCHUDULED,
+          cancellationDeadline: this.cancellationDeadline(dto.reservedFor),
+          rescheduleCount: { increment: 1 },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'RESERVATION_RESCHEDULED',
+          entityType: 'RESERVATION',
+          entityId: id,
+          ...(existing && {
+            oldValues: {
+              reservedFor: existing.reservedFor.toISOString(),
+              reservationStatus: existing.reservationStatus,
+            },
+          }),
+          newValues: {
+            reservedFor: reservation.reservedFor.toISOString(),
+            reservationStatus: reservation.reservationStatus,
+          },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+
+      return reservation;
     });
   }
 
-  cancel(id: string): Promise<Reservation> {
-    return this.prisma.reservation.update({
-      where: { id },
-      data: { reservationStatus: RESERVATIONS_STATUS.CANCELLED },
+  cancel(id: string, actorUserId: string): Promise<Reservation> {
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.reservation.findUnique({ where: { id } });
+      const reservation = await tx.reservation.update({
+        where: { id },
+        data: { reservationStatus: RESERVATIONS_STATUS.CANCELLED },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'RESERVATION_SOFT_DELETED',
+          entityType: 'RESERVATION',
+          entityId: id,
+          ...(existing && {
+            oldValues: { reservationStatus: existing.reservationStatus },
+          }),
+          newValues: { reservationStatus: reservation.reservationStatus },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+
+      return reservation;
     });
   }
 

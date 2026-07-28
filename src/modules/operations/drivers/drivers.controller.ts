@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   HttpStatus,
@@ -22,6 +23,7 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { CreateDriverDto } from './dto/create-driver.dto';
 import { DriverQueryDto } from './dto/driver-query.dto';
 import { RegisterDriverDto } from './dto/register-driver.dto';
+import { UpdateDriverDto } from './dto/update-driver.dto';
 import { UpdateDriverStatusDto } from './dto/update-driver-status.dto';
 import { UpdateDriverVerificationDto } from './dto/update-driver-verification.dto';
 import { DriversService } from './drivers.service';
@@ -74,6 +76,17 @@ export class DriversController {
     return this.service.findOne(id);
   }
 
+  @ApiOperation({ summary: 'Update a driver profile' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Patch(':id')
+  update(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateDriverDto,
+  ): Promise<DriverProfile> {
+    return this.service.update(id, dto, user.id);
+  }
+
   @ApiOperation({ summary: 'Update driver availability' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.DRIVER)
   @Patch(':id/status')
@@ -93,5 +106,15 @@ export class DriversController {
     @Body() dto: UpdateDriverVerificationDto,
   ): Promise<DriverProfile> {
     return this.service.updateVerification(id, dto);
+  }
+
+  @ApiOperation({ summary: 'Soft delete a driver by suspending access' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Delete(':id')
+  softDelete(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<DriverProfile> {
+    return this.service.softDelete(id, user.id);
   }
 }

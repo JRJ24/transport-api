@@ -6,6 +6,7 @@ import { notificationConfig } from './notification.config';
 import { paymentConfig } from './payment.config';
 import { storageConfig } from './storage.config';
 import { trackingConfig } from './tracking.config';
+import { whatsappConfig } from './whatsapp.config';
 import { googleMapsConfig } from '@/integrations/google-maps/google-maps.config';
 
 export * from './app.config';
@@ -17,6 +18,7 @@ export * from './notification.config';
 export * from './payment.config';
 export * from './storage.config';
 export * from './tracking.config';
+export * from './whatsapp.config';
 
 export const configLoaders = [
   appConfig,
@@ -27,5 +29,6 @@ export const configLoaders = [
   paymentConfig,
   storageConfig,
   trackingConfig,
+  whatsappConfig,
   googleMapsConfig,
 ];

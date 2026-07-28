@@ -121,6 +121,24 @@ export const envSchema = z.object({
   REDIS_PORT: z.coerce.number().int().positive().default(6379),
   NOTIFICATIONS_QUEUE_DRIVER: z.enum(['bullmq', 'inline']).optional(),
 
+  // ── WhatsApp Business / 360dialog lead notifications ────────────────────
+  WHATSAPP_PROVIDER: z
+    .enum(['disabled', 'meta', '360dialog', 'DISABLED', 'META', '360DIALOG'])
+    .default('disabled'),
+  WHATSAPP_API_KEY: z.string().optional(),
+  WHATSAPP_PHONE_NUMBER_ID: z.string().optional(),
+  WHATSAPP_LEADS_TO: z.string().optional(),
+  WHATSAPP_PUBLIC_FALLBACK_NUMBER: z.string().optional(),
+  WHATSAPP_GRAPH_API_BASE_URL: z
+    .string()
+    .url()
+    .default('https://graph.facebook.com/v20.0'),
+  WHATSAPP_360DIALOG_API_URL: z
+    .string()
+    .url()
+    .default('https://waba-v2.360dialog.io/messages'),
+  WHATSAPP_TIMEOUT_MS: z.coerce.number().int().positive().default(10_000),
+
   // ── Evidence file storage (S3-compatible Spaces) ─────────────────────────
   STORAGE_DRIVER: z.enum(['spaces', 's3', 'local']).default('spaces'),
   SPACES_ENDPOINT: z.string().optional(),

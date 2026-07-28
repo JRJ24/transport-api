@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   ParseUUIDPipe,
@@ -11,7 +12,9 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Vehicle, VehicleDocument } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
+import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
+import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CreateVehicleDocumentDto } from './dto/create-vehicle-document.dto';
 import { CreateVehicleDto } from './dto/create-vehicle.dto';
 import { UpdateVehicleDto } from './dto/update-vehicle.dto';
@@ -50,6 +53,15 @@ export class VehiclesController {
     @Body() dto: UpdateVehicleDto,
   ): Promise<Vehicle> {
     return this.service.update(id, dto);
+  }
+
+  @ApiOperation({ summary: 'Soft delete a vehicle by marking it inactive' })
+  @Delete(':id')
+  softDelete(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<Vehicle> {
+    return this.service.softDelete(id, user.id);
   }
 
   @ApiOperation({ summary: 'List vehicle documents' })

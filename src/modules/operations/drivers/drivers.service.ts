@@ -6,6 +6,7 @@ import {
 import type { DriverProfile, Prisma } from '@generated/prisma/client';
 import {
   ROLES,
+  STATUS_ACCOUNT,
   STATUS_DRIVER,
   STATUS_VEHICLE,
   VERIFICATION_STATUS,
@@ -17,6 +18,7 @@ import { PrismaService } from '@/database/prisma.service';
 import type { CreateDriverDto } from './dto/create-driver.dto';
 import type { DriverQueryDto } from './dto/driver-query.dto';
 import type { RegisterDriverDto } from './dto/register-driver.dto';
+import type { UpdateDriverDto } from './dto/update-driver.dto';
 import type { UpdateDriverStatusDto } from './dto/update-driver-status.dto';
 import type { UpdateDriverVerificationDto } from './dto/update-driver-verification.dto';
 
@@ -95,6 +97,68 @@ export class DriversService {
         ratingAVG: 0,
       },
       include: { user: { select: SAFE_USER_SELECT } },
+    });
+  }
+
+  async update(
+    id: string,
+    dto: UpdateDriverDto,
+    actorUserId: string,
+  ): Promise<DriverProfile> {
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.driverProfile.findUnique({
+        where: { id },
+        include: { user: { select: SAFE_USER_SELECT } },
+      });
+      const driver = await tx.driverProfile.update({
+        where: { id },
+        data: {
+          ...(dto.userId !== undefined && { userId: dto.userId }),
+          ...(dto.licenseNumber !== undefined && {
+            licenseNumber: dto.licenseNumber.trim(),
+          }),
+          ...(dto.licenseExpiration !== undefined && {
+            licenseExpiration: dto.licenseExpiration,
+          }),
+          ...(dto.availabilityStatus !== undefined && {
+            availabilityStatus: dto.availabilityStatus,
+          }),
+          ...(dto.verificationStatus !== undefined && {
+            verificationStatus: dto.verificationStatus,
+          }),
+        },
+        include: { user: { select: SAFE_USER_SELECT } },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'DRIVER_UPDATED',
+          entityType: 'DRIVER',
+          entityId: id,
+          ...(existing && {
+            oldValues: {
+              userId: existing.userId,
+              licenseNumber: existing.licenseNumber,
+              licenseExpiration: existing.licenseExpiration.toISOString(),
+              availabilityStatus: existing.availabilityStatus,
+              verificationStatus: existing.verificationStatus,
+            },
+          }),
+          newValues: {
+            userId: driver.userId,
+            licenseNumber: driver.licenseNumber,
+            licenseExpiration: driver.licenseExpiration.toISOString(),
+            availabilityStatus: driver.availabilityStatus,
+            verificationStatus: driver.verificationStatus,
+          },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+
+      return driver;
     });
   }
 
@@ -220,6 +284,52 @@ export class DriversService {
           data: { status: STATUS_VEHICLE.SUSPENDED },
         });
       }
+
+      return driver;
+    });
+  }
+
+  async softDelete(id: string, actorUserId: string): Promise<DriverProfile> {
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.driverProfile.findUnique({
+        where: { id },
+        include: { user: { select: SAFE_USER_SELECT } },
+      });
+      const driver = await tx.driverProfile.update({
+        where: { id },
+        data: { availabilityStatus: STATUS_DRIVER.SUSPENDED },
+        include: { user: { select: SAFE_USER_SELECT } },
+      });
+
+      await tx.user.update({
+        where: { id: driver.userId },
+        data: { status: STATUS_ACCOUNT.INACTIVE },
+      });
+      await tx.vehicle.updateMany({
+        where: { driverId: id },
+        data: { status: STATUS_VEHICLE.SUSPENDED },
+      });
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'DRIVER_SOFT_DELETED',
+          entityType: 'DRIVER',
+          entityId: id,
+          ...(existing && {
+            oldValues: {
+              availabilityStatus: existing.availabilityStatus,
+              userStatus: existing.user.status,
+            },
+          }),
+          newValues: {
+            availabilityStatus: STATUS_DRIVER.SUSPENDED,
+            userStatus: STATUS_ACCOUNT.INACTIVE,
+          },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
 
       return driver;
     });

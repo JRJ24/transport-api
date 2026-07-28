@@ -12,7 +12,7 @@ import type {
   CustomerProfile,
   Prisma,
 } from '@generated/prisma/client';
-import { ROLES, TYPE_CUSTOMER } from '@generated/prisma/enums';
+import { ROLES, STATUS_ACCOUNT, TYPE_CUSTOMER } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { hashPassword } from '@/common/utils/hash.util';
 import { authConfig } from '@/config';
@@ -23,6 +23,7 @@ import type { CreateTmsCustomerDto } from './dto/create-tms-customer.dto';
 import type { CustomerQueryDto } from './dto/customer-query.dto';
 import type { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
 import type { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
+import type { UpdateTmsCustomerDto } from './dto/update-tms-customer.dto';
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -208,6 +209,151 @@ export class CustomersService {
             userId: customerUser.id,
             source: 'transport-portal',
           },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+
+      return profile;
+    });
+  }
+
+  async updateFromTms(
+    actorUserId: string,
+    id: string,
+    dto: UpdateTmsCustomerDto,
+  ): Promise<unknown> {
+    const existing = await this.prisma.customerProfile.findUnique({
+      where: { id },
+      include: { user: { select: SAFE_USER_SELECT } },
+    });
+
+    if (!existing) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Customer profile not found',
+      });
+    }
+
+    const nextCustomerType = dto.customerType ?? existing.customerType;
+    const nextCompanyName =
+      dto.companyName !== undefined
+        ? this.optionalString(dto.companyName)
+        : existing.companyName;
+    this.assertBusinessHasCompanyName(nextCustomerType, nextCompanyName);
+
+    return this.prisma.$transaction(async (tx) => {
+      if (dto.fullName !== undefined || dto.email !== undefined || dto.phone !== undefined) {
+        await tx.user.update({
+          where: { id: existing.userId },
+          data: {
+            ...(dto.fullName !== undefined && { fullName: dto.fullName.trim() }),
+            ...(dto.email !== undefined && { email: dto.email.toLowerCase().trim() }),
+            ...(dto.phone !== undefined && { phone: dto.phone.trim() }),
+          },
+        });
+      }
+
+      const profile = await tx.customerProfile.update({
+        where: { id },
+        data: {
+          ...(dto.customerType !== undefined && { customerType: dto.customerType }),
+          ...(dto.documentType !== undefined && { documentType: dto.documentType }),
+          ...(dto.documentNumber !== undefined && {
+            documentNumber: dto.documentNumber.trim(),
+          }),
+          ...(dto.companyName !== undefined && { companyName: nextCompanyName }),
+          ...(dto.billingEmail !== undefined && {
+            billingEmail: this.optionalEmail(dto.billingEmail),
+          }),
+        },
+        include: {
+          user: { select: SAFE_USER_SELECT },
+          customerAddresses: true,
+          transportOrders: { select: { id: true, status: true } },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'CUSTOMER_UPDATED_TMS',
+          entityType: 'CUSTOMER',
+          entityId: id,
+          oldValues: {
+            customerType: existing.customerType,
+            documentType: existing.documentType,
+            documentNumber: existing.documentNumber,
+            companyName: existing.companyName,
+            billingEmail: existing.billingEmail,
+            user: {
+              id: existing.user.id,
+              fullName: existing.user.fullName,
+              email: existing.user.email,
+              phone: existing.user.phone,
+              status: existing.user.status,
+            },
+          },
+          newValues: {
+            customerType: profile.customerType,
+            documentType: profile.documentType,
+            documentNumber: profile.documentNumber,
+            companyName: profile.companyName,
+            billingEmail: profile.billingEmail,
+            user: {
+              id: profile.user.id,
+              fullName: profile.user.fullName,
+              email: profile.user.email,
+              phone: profile.user.phone,
+              status: profile.user.status,
+            },
+          },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+
+      return profile;
+    });
+  }
+
+  async deactivateFromTms(actorUserId: string, id: string): Promise<unknown> {
+    const existing = await this.prisma.customerProfile.findUnique({
+      where: { id },
+      include: { user: { select: SAFE_USER_SELECT } },
+    });
+
+    if (!existing) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Customer profile not found',
+      });
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      await tx.user.update({
+        where: { id: existing.userId },
+        data: { status: STATUS_ACCOUNT.INACTIVE },
+      });
+      const profile = await tx.customerProfile.findUniqueOrThrow({
+        where: { id },
+        include: {
+          user: { select: SAFE_USER_SELECT },
+          customerAddresses: true,
+          transportOrders: { select: { id: true, status: true } },
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'CUSTOMER_SOFT_DELETED',
+          entityType: 'CUSTOMER',
+          entityId: id,
+          oldValues: { userStatus: existing.user.status },
+          newValues: { userStatus: STATUS_ACCOUNT.INACTIVE },
           ipAddress: null,
           userAgent: null,
           createdAt: new Date(),

@@ -10,6 +10,7 @@ import {
   ASSIGNMENT_STATUS,
   EVENT_TYPE,
   PAYMENT_STATUS,
+  QUOTE_STATUS,
   RESERVATIONS_STATUS,
   ROLES,
   SERVICE_TYPE,
@@ -820,11 +821,118 @@ export class OrdersService {
     return this.assignments.accept(assignment.id, user);
   }
 
+  async confirmByCustomer(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<TransportOrder> {
+    const customer = await this.getCustomerProfile(user.id);
+    const current = await this.prisma.transportOrder.findFirst({
+      where: { id, customerId: customer.id },
+      select: {
+        id: true,
+        status: true,
+        quoteId: true,
+        totalAmount: true,
+      },
+    });
+
+    if (!current) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Order not found for this customer',
+      });
+    }
+
+    if (current.status !== STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Only orders pending customer confirmation can be accepted',
+      });
+    }
+
+    if (current.totalAmount === null || Number(current.totalAmount) <= 0) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Order has no payable amount',
+      });
+    }
+
+    const order = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.transportOrder.update({
+        where: { id },
+        data: {
+          status: STATUS_ORDERS.PENDING_PAYMENT,
+          paymentStatus: PAYMENT_STATUS.PENDING,
+        },
+        include: ORDER_INCLUDE,
+      });
+
+      if (current.quoteId) {
+        await tx.priceQuote.update({
+          where: { id: current.quoteId },
+          data: { quoteStatus: QUOTE_STATUS.ACCEPTED },
+        });
+      }
+
+      await tx.orderEvent.create({
+        data: {
+          orderId: id,
+          eventType: EVENT_TYPE.ACCEPTED,
+          actorUserId: user.id,
+          description: 'Customer accepted TMS quote; payment is required',
+          metadata: {
+            previousStatus: current.status,
+            status: STATUS_ORDERS.PENDING_PAYMENT,
+            paymentProvider: 'cardnet',
+          },
+          latitude: null,
+          longitude: null,
+        },
+      });
+
+      return updated;
+    });
+
+    this.realtime.emitOrderStatusChanged({
+      orderId: id,
+      status: STATUS_ORDERS.PENDING_PAYMENT,
+      previousStatus: current.status,
+      changedByUserId: user.id,
+      changedAt: new Date().toISOString(),
+    });
+
+    void this.notifyOperators(
+      'ORDER_STATUS_CHANGED',
+      order,
+      STATUS_ORDERS.PENDING_PAYMENT,
+    ).catch((error: unknown) =>
+      this.logger.error(
+        `Failed to notify operators about customer confirmation: ${error instanceof Error ? error.message : 'unknown'}`,
+      ),
+    );
+
+    return order;
+  }
+
   async cancel(
     user: AuthenticatedUser,
     id: string,
     dto: CancelOrderDto,
   ): Promise<TransportOrder> {
+    const current = await this.prisma.transportOrder.findUnique({
+      where: { id },
+      select: { status: true, paymentStatus: true, customerId: true },
+    });
+
+    if (!current) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Order not found',
+      });
+    }
+
+    await this.assertCanReadOrder(user, current.customerId);
+
     const order = await this.prisma.$transaction(async (tx) => {
       const order = await tx.transportOrder.update({
         where: { id },
@@ -855,6 +963,27 @@ export class OrdersService {
           },
           latitude: null,
           longitude: 0,
+        },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId: user.id,
+          action: 'ORDER_SOFT_DELETED',
+          entityType: 'ORDER',
+          entityId: id,
+          oldValues: {
+            status: current.status,
+            paymentStatus: current.paymentStatus,
+          },
+          newValues: {
+            status: STATUS_ORDERS.CANCELLED,
+            cancellationType: dto.cancellationType,
+            reason: dto.reason.trim(),
+          },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
         },
       });
 

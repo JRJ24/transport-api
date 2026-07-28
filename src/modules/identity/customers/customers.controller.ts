@@ -23,6 +23,7 @@ import { CreateTmsCustomerDto } from './dto/create-tms-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
 import { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
 import { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
+import { UpdateTmsCustomerDto } from './dto/update-tms-customer.dto';
 import {
   toCustomerAddressResponse,
   toCustomerProfileResponse,
@@ -52,6 +53,27 @@ export class CustomersController {
     @Body() dto: CreateTmsCustomerDto,
   ): Promise<unknown> {
     return this.customersService.createFromTms(user.id, dto);
+  }
+
+  @ApiOperation({ summary: 'Update a customer profile from TMS' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Patch(':id/tms')
+  updateFromTms(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateTmsCustomerDto,
+  ): Promise<unknown> {
+    return this.customersService.updateFromTms(user.id, id, dto);
+  }
+
+  @ApiOperation({ summary: 'Soft delete a customer by deactivating account' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Delete(':id')
+  deactivateFromTms(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<unknown> {
+    return this.customersService.deactivateFromTms(user.id, id);
   }
 
   @ApiOperation({ summary: 'Get my customer profile' })

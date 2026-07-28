@@ -91,6 +91,37 @@ export class VehiclesService {
     });
   }
 
+  async softDelete(id: string, actorUserId: string): Promise<Vehicle> {
+    return this.prisma.$transaction(async (tx) => {
+      const existing = await tx.vehicle.findUnique({ where: { id } });
+      const updated = await tx.vehicle.update({
+        where: { id },
+        data: { status: STATUS_VEHICLE.INACTIVE },
+      });
+
+      await tx.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'VEHICLE_SOFT_DELETED',
+          entityType: 'VEHICLE',
+          entityId: id,
+          ...(existing && {
+            oldValues: {
+              status: existing.status,
+              plateNumber: existing.plateNumber,
+            },
+          }),
+          newValues: { status: updated.status, plateNumber: updated.plateNumber },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+
+      return updated;
+    });
+  }
+
   listDocuments(vehicleId: string): Promise<VehicleDocument[]> {
     return this.prisma.vehicleDocument.findMany({
       where: { vehicleId },

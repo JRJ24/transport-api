@@ -11,7 +11,9 @@ import {
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Reservation } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
+import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
+import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CreateReservationDto } from './dto/create-reservation.dto';
 import { ReservationQueryDto } from './dto/reservation-query.dto';
 import { RescheduleReservationDto } from './dto/reschedule-reservation.dto';
@@ -39,16 +41,20 @@ export class ReservationsController {
   @ApiOperation({ summary: 'Reschedule a reservation' })
   @Patch(':id/reschedule')
   reschedule(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: RescheduleReservationDto,
   ): Promise<Reservation> {
-    return this.service.reschedule(id, dto);
+    return this.service.reschedule(id, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Cancel a reservation' })
   @Patch(':id/cancel')
-  cancel(@Param('id', ParseUUIDPipe) id: string): Promise<Reservation> {
-    return this.service.cancel(id);
+  cancel(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<Reservation> {
+    return this.service.cancel(id, user.id);
   }
 
   @ApiOperation({ summary: 'Complete a reservation' })
