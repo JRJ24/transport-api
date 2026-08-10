@@ -3,7 +3,7 @@ import {
   ForbiddenException,
   Injectable,
 } from '@nestjs/common';
-import type { DriverProfile, Prisma } from '@generated/prisma/client';
+import type { DriverProfile, Prisma, Vehicle } from '@generated/prisma/client';
 import {
   ROLES,
   STATUS_ACCOUNT,
@@ -82,6 +82,23 @@ export class DriversService {
     return this.prisma.driverProfile.findFirst({
       where: { userId },
       include: { user: { select: SAFE_USER_SELECT }, driverDocuments: true },
+    });
+  }
+
+  async findMyVehicles(userId: string): Promise<Vehicle[]> {
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { userId },
+      select: { id: true },
+    });
+
+    if (!driver) {
+      return [];
+    }
+
+    return this.prisma.vehicle.findMany({
+      where: { driverId: driver.id },
+      include: { vehicleCategory: true, vehiclesDocuments: true },
+      orderBy: [{ status: 'asc' }, { createdAt: 'desc' }],
     });
   }
 

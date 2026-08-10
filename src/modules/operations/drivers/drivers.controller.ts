@@ -13,7 +13,7 @@ import {
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
-import type { DriverProfile } from '@generated/prisma/client';
+import type { DriverProfile, Vehicle } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import { AllowUnverifiedDriver } from '@/common/decorators/allow-unverified-driver.decorator';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
@@ -49,6 +49,13 @@ export class DriversController {
     @CurrentUser() user: AuthenticatedUser,
   ): Promise<DriverProfile | null> {
     return this.service.findMine(user.id);
+  }
+
+  @ApiOperation({ summary: 'List vehicles owned by the authenticated driver' })
+  @Roles(ROLES.DRIVER)
+  @Get('me/vehicles')
+  findMyVehicles(@CurrentUser() user: AuthenticatedUser): Promise<Vehicle[]> {
+    return this.service.findMyVehicles(user.id);
   }
 
   @ApiOperation({ summary: 'Register a new driver for portal approval' })
