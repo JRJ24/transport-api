@@ -1,4 +1,6 @@
 import {
+  BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -12,6 +14,8 @@ import {
   ROLES,
   STATUS_DRIVER,
   STATUS_ORDERS,
+  STATUS_VEHICLE,
+  VERIFICATION_STATUS,
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
@@ -29,6 +33,22 @@ const SAFE_USER_SELECT = {
   createdAt: true,
   updatedAt: true,
 } as const;
+
+const ACTIVE_ASSIGNMENT_STATUSES: ASSIGNMENT_STATUS[] = [
+  ASSIGNMENT_STATUS.PENDING,
+  ASSIGNMENT_STATUS.ACCEPTED,
+];
+
+const ACTIVE_ORDER_STATUSES: STATUS_ORDERS[] = [
+  STATUS_ORDERS.ASSIGNED,
+  STATUS_ORDERS.ACCEPTED,
+  STATUS_ORDERS.IN_PROGRESS,
+];
+
+const DISPATCHABLE_PAYMENT_STATUSES: PAYMENT_STATUS[] = [
+  PAYMENT_STATUS.PAID,
+  PAYMENT_STATUS.AUTHORIZED,
+];
 
 @Injectable()
 export class AssignmentsService {
@@ -106,7 +126,7 @@ export class AssignmentsService {
   ): Promise<OrderAssignment> {
     const currentOrder = await this.prisma.transportOrder.findUnique({
       where: { id: dto.orderId },
-      select: { status: true, paymentStatus: true },
+      select: { status: true, paymentStatus: true, vehicleCategoryId: true },
     });
 
     if (!currentOrder) {
@@ -118,15 +138,55 @@ export class AssignmentsService {
 
     if (
       currentOrder.status !== STATUS_ORDERS.REQUESTED ||
-      currentOrder.paymentStatus !== PAYMENT_STATUS.PAID
+      !DISPATCHABLE_PAYMENT_STATUSES.includes(currentOrder.paymentStatus)
     ) {
       throw new ForbiddenException({
         code: ERROR_CODES.FORBIDDEN,
-        message: 'Order must be paid before assignment',
+        message: 'Order must be paid or dispatch-authorized before assignment',
       });
     }
 
+    await this.assertDriverVehicleCanTakeOrder(
+      dto.driverId,
+      dto.vehicleId,
+      currentOrder.vehicleCategoryId,
+    );
+
     const assignment = await this.prisma.$transaction(async (tx) => {
+      const claimedOrder = await tx.transportOrder.updateMany({
+        where: {
+          id: dto.orderId,
+          status: STATUS_ORDERS.REQUESTED,
+          paymentStatus: { in: [...DISPATCHABLE_PAYMENT_STATUSES] },
+          orderAssignments: {
+            none: { assignmentStatus: { in: [...ACTIVE_ASSIGNMENT_STATUSES] } },
+          },
+        },
+        data: { status: STATUS_ORDERS.ASSIGNED },
+      });
+
+      if (claimedOrder.count !== 1) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'Order is no longer available for assignment',
+        });
+      }
+
+      const claimedDriver = await tx.driverProfile.updateMany({
+        where: {
+          id: dto.driverId,
+          availabilityStatus: STATUS_DRIVER.AVAILABLE,
+        },
+        data: { availabilityStatus: STATUS_DRIVER.BUSY },
+      });
+
+      if (claimedDriver.count !== 1) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'Driver is no longer available',
+        });
+      }
+
       const created = await tx.orderAssignment.create({
         data: {
           orderId: dto.orderId,
@@ -137,14 +197,6 @@ export class AssignmentsService {
         },
       });
 
-      await tx.transportOrder.update({
-        where: { id: dto.orderId },
-        data: { status: STATUS_ORDERS.ASSIGNED },
-      });
-      await tx.driverProfile.update({
-        where: { id: dto.driverId },
-        data: { availabilityStatus: STATUS_DRIVER.BUSY },
-      });
       await this.recordEvent(tx, dto.orderId, user.id, EVENT_TYPE.ASSIGNED);
 
       return created;
@@ -166,6 +218,126 @@ export class AssignmentsService {
       changedByUserId: user.id,
       changedAt: new Date().toISOString(),
     });
+    return assignment;
+  }
+
+  async claimOrder(
+    user: AuthenticatedUser,
+    orderId: string,
+    vehicleId: string,
+  ): Promise<OrderAssignment> {
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { userId: user.id },
+      select: {
+        id: true,
+        availabilityStatus: true,
+        verificationStatus: true,
+        licenseExpiration: true,
+      },
+    });
+
+    if (!driver) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Driver profile not found',
+      });
+    }
+
+    this.assertDriverReady(driver);
+
+    const order = await this.prisma.transportOrder.findUnique({
+      where: { id: orderId },
+      select: { status: true, paymentStatus: true, vehicleCategoryId: true },
+    });
+
+    if (!order) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Order not found',
+      });
+    }
+
+    if (
+      order.status !== STATUS_ORDERS.REQUESTED ||
+      !DISPATCHABLE_PAYMENT_STATUSES.includes(order.paymentStatus)
+    ) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'Order is not available for driver self-dispatch',
+      });
+    }
+
+    await this.assertDriverHasNoActiveTrip(driver.id);
+    await this.assertVehicleCanTakeOrder(
+      vehicleId,
+      driver.id,
+      order.vehicleCategoryId,
+    );
+
+    const assignment = await this.prisma.$transaction(async (tx) => {
+      const claimedOrder = await tx.transportOrder.updateMany({
+        where: {
+          id: orderId,
+          status: STATUS_ORDERS.REQUESTED,
+          paymentStatus: { in: [...DISPATCHABLE_PAYMENT_STATUSES] },
+          orderAssignments: {
+            none: { assignmentStatus: { in: [...ACTIVE_ASSIGNMENT_STATUSES] } },
+          },
+        },
+        data: { status: STATUS_ORDERS.ACCEPTED },
+      });
+
+      if (claimedOrder.count !== 1) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'Order was already taken by another driver',
+        });
+      }
+
+      const claimedDriver = await tx.driverProfile.updateMany({
+        where: { id: driver.id, availabilityStatus: STATUS_DRIVER.AVAILABLE },
+        data: { availabilityStatus: STATUS_DRIVER.BUSY },
+      });
+
+      if (claimedDriver.count !== 1) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'Driver already has an active trip',
+        });
+      }
+
+      const created = await tx.orderAssignment.create({
+        data: {
+          orderId,
+          driverId: driver.id,
+          vehicleId,
+          assignedBy: null,
+          assignmentStatus: ASSIGNMENT_STATUS.ACCEPTED,
+          acceptedAt: new Date(),
+        },
+      });
+
+      await this.recordEvent(tx, orderId, user.id, EVENT_TYPE.ACCEPTED);
+
+      return created;
+    });
+
+    this.realtime.emitAssignmentCreated({
+      assignmentId: assignment.id,
+      orderId: assignment.orderId,
+      driverId: assignment.driverId,
+      vehicleId: assignment.vehicleId,
+      assignmentStatus: assignment.assignmentStatus,
+      assignedAt: assignment.assignedAt.toISOString(),
+    });
+    this.realtime.emitOrderStatusChanged({
+      orderId,
+      status: STATUS_ORDERS.ACCEPTED,
+      previousStatus: STATUS_ORDERS.REQUESTED,
+      changedByUserId: user.id,
+      changedAt: new Date().toISOString(),
+    });
+
     return assignment;
   }
 
@@ -292,6 +464,114 @@ export class AssignmentsService {
       throw new ForbiddenException({
         code: ERROR_CODES.FORBIDDEN,
         message: 'You cannot mutate another driver assignment',
+      });
+    }
+  }
+
+  private async assertDriverVehicleCanTakeOrder(
+    driverId: string,
+    vehicleId: string,
+    vehicleCategoryId: string,
+  ): Promise<void> {
+    const driver = await this.prisma.driverProfile.findUnique({
+      where: { id: driverId },
+      select: {
+        id: true,
+        availabilityStatus: true,
+        verificationStatus: true,
+        licenseExpiration: true,
+      },
+    });
+
+    if (!driver) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Driver profile not found',
+      });
+    }
+
+    this.assertDriverReady(driver);
+    await this.assertDriverHasNoActiveTrip(driver.id);
+    await this.assertVehicleCanTakeOrder(
+      vehicleId,
+      driver.id,
+      vehicleCategoryId,
+    );
+  }
+
+  private assertDriverReady(driver: {
+    availabilityStatus: STATUS_DRIVER;
+    verificationStatus: VERIFICATION_STATUS;
+    licenseExpiration: Date;
+  }): void {
+    if (driver.verificationStatus !== VERIFICATION_STATUS.APPROVED) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'Driver must be approved before taking orders',
+      });
+    }
+
+    if (driver.availabilityStatus !== STATUS_DRIVER.AVAILABLE) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'Driver is not available',
+      });
+    }
+
+    if (driver.licenseExpiration.getTime() <= Date.now()) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Driver license is expired',
+      });
+    }
+  }
+
+  private async assertDriverHasNoActiveTrip(driverId: string): Promise<void> {
+    const active = await this.prisma.orderAssignment.findFirst({
+      where: {
+        driverId,
+        assignmentStatus: { in: [...ACTIVE_ASSIGNMENT_STATUSES] },
+        order: { status: { in: [...ACTIVE_ORDER_STATUSES] } },
+      },
+      select: { id: true },
+    });
+
+    if (active) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'Driver already has an active trip',
+      });
+    }
+  }
+
+  private async assertVehicleCanTakeOrder(
+    vehicleId: string,
+    driverId: string,
+    vehicleCategoryId: string,
+  ): Promise<void> {
+    const vehicle = await this.prisma.vehicle.findFirst({
+      where: { id: vehicleId, driverId },
+      select: { id: true, status: true, categoryId: true },
+    });
+
+    if (!vehicle) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Vehicle not found for this driver',
+      });
+    }
+
+    if (vehicle.status !== STATUS_VEHICLE.ACTIVE) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'Vehicle must be active to take orders',
+      });
+    }
+
+    if (vehicle.categoryId !== vehicleCategoryId) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Vehicle category does not match the order category',
       });
     }
   }

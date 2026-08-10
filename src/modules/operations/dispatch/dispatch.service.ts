@@ -1,13 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import type { OrderAssignment } from '@generated/prisma/client';
 import {
-  ASSIGNMENT_STATUS,
+  PAYMENT_STATUS,
   STATUS_DRIVER,
   STATUS_ORDERS,
   VERIFICATION_STATUS,
 } from '@generated/prisma/enums';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
+import { AssignmentsService } from '../assignments/assignments.service';
 import type { DispatchOrderDto } from './dto/dispatch-order.dto';
 
 const SAFE_USER_SELECT = {
@@ -22,11 +23,17 @@ const SAFE_USER_SELECT = {
 
 @Injectable()
 export class DispatchService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly assignments: AssignmentsService,
+  ) {}
 
   pendingOrders() {
     return this.prisma.transportOrder.findMany({
-      where: { status: STATUS_ORDERS.REQUESTED },
+      where: {
+        status: STATUS_ORDERS.REQUESTED,
+        paymentStatus: { in: [PAYMENT_STATUS.PAID, PAYMENT_STATUS.AUTHORIZED] },
+      },
       include: { orderStops: true, orderItems: true },
       orderBy: { createdAt: 'asc' },
     });
@@ -47,27 +54,6 @@ export class DispatchService {
     user: AuthenticatedUser,
     dto: DispatchOrderDto,
   ): Promise<OrderAssignment> {
-    return this.prisma.$transaction(async (tx) => {
-      const assignment = await tx.orderAssignment.create({
-        data: {
-          orderId: dto.orderId,
-          driverId: dto.driverId,
-          vehicleId: dto.vehicleId,
-          assignedBy: user.id,
-          assignmentStatus: ASSIGNMENT_STATUS.PENDING,
-        },
-      });
-
-      await tx.transportOrder.update({
-        where: { id: dto.orderId },
-        data: { status: STATUS_ORDERS.ASSIGNED },
-      });
-      await tx.driverProfile.update({
-        where: { id: dto.driverId },
-        data: { availabilityStatus: STATUS_DRIVER.BUSY },
-      });
-
-      return assignment;
-    });
+    return this.assignments.create(user, dto);
   }
 }

@@ -139,7 +139,7 @@ export class TripsService {
         driverId,
         orderId,
         assignmentStatus: {
-          in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+          in: [ASSIGNMENT_STATUS.ACCEPTED],
         },
       },
     });

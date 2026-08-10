@@ -383,7 +383,7 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
         driverId,
         orderId,
         assignmentStatus: {
-          in: [ASSIGNMENT_STATUS.ACCEPTED, ASSIGNMENT_STATUS.PENDING],
+          in: [ASSIGNMENT_STATUS.ACCEPTED],
         },
       },
     });

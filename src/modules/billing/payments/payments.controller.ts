@@ -19,8 +19,10 @@ import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Public } from '@/common/decorators/public.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
+import { ApproveCorporateCreditPaymentDto } from './dto/approve-corporate-credit-payment.dto';
 import { CreateCardnetSessionDto } from './dto/create-cardnet-session.dto';
 import { CreatePaymentDto } from './dto/create-payment.dto';
+import { RegisterCheckPaymentDto } from './dto/register-check-payment.dto';
 import { UpdatePaymentStatusDto } from './dto/update-payment-status.dto';
 import {
   PaymentsService,
@@ -50,6 +52,26 @@ export class PaymentsController {
     @Body() dto: CreatePaymentDto,
   ): Promise<CreatePaymentResult> {
     return this.service.create(dto, user);
+  }
+
+  @ApiOperation({ summary: 'Register a received check and authorize dispatch' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Post('checks')
+  registerCheck(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: RegisterCheckPaymentDto,
+  ): Promise<CreatePaymentResult> {
+    return this.service.registerCheck(dto, user);
+  }
+
+  @ApiOperation({ summary: 'Authorize an order using corporate credit' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
+  @Post('corporate-credit')
+  approveCorporateCredit(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: ApproveCorporateCreditPaymentDto,
+  ): Promise<CreatePaymentResult> {
+    return this.service.approveCorporateCredit(dto, user);
   }
 
   @ApiOperation({ summary: 'Create CardNET payment session for an order' })

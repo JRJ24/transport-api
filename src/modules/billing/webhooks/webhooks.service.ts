@@ -4,6 +4,7 @@ import {
   PAYMENT_STATUS,
   PAYMENT_TRANSACTIONS_TYPE,
   PAYMENTS_TRANSACTIONS_STATUS,
+  STATUS_ORDERS,
 } from '@generated/prisma/enums';
 import { PrismaService } from '@/database/prisma.service';
 import { optionalString } from '../payments/providers/payment-provider.interface';
@@ -80,6 +81,10 @@ export class WebhooksService {
       const payment = await this.findPaymentForWebhook(tx, payload);
       const status = this.statusFromWebhook(payload);
 
+      if (!payment || !status) {
+        return event;
+      }
+
       if (payment && status) {
         await tx.payment.update({
           where: { id: payment.id },
@@ -93,6 +98,24 @@ export class WebhooksService {
           where: { id: payment.orderId },
           data: { paymentStatus: status },
         });
+
+        if (status === PAYMENT_STATUS.PAID) {
+          await tx.transportOrder.updateMany({
+            where: {
+              id: payment.orderId,
+              status: {
+                in: [
+                  STATUS_ORDERS.DRAFT,
+                  STATUS_ORDERS.PENDING_QUOTE,
+                  STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION,
+                  STATUS_ORDERS.PENDING_PAYMENT,
+                  STATUS_ORDERS.CONFIRMED,
+                ],
+              },
+            },
+            data: { status: STATUS_ORDERS.REQUESTED },
+          });
+        }
 
         await tx.paymentTransaction.create({
           data: {
@@ -134,16 +157,46 @@ export class WebhooksService {
     }
 
     const providerReference =
+      optionalString(payload.SESSION) ??
+      optionalString(payload.Session) ??
+      optionalString(payload.session) ??
       optionalString(payload.providerReference) ??
       optionalString(payload.transactionId) ??
       optionalString(payload.TransactionId) ??
-      optionalString(payload.reference);
+      optionalString(payload.TransactionID) ??
+      optionalString(payload.reference) ??
+      optionalString(payload.Reference);
 
-    if (!providerReference) {
+    const orderCode =
+      optionalString(payload.OrdenID) ??
+      optionalString(payload.OrdenId) ??
+      optionalString(payload.orderCode) ??
+      optionalString(payload.orderId);
+
+    if (providerReference) {
+      const payment = await tx.payment.findFirst({
+        where: {
+          OR: [
+            { providerReference },
+            { providerSessionId: providerReference },
+            { transactionId: providerReference },
+          ],
+        },
+      });
+
+      if (payment) {
+        return payment;
+      }
+    }
+
+    if (!orderCode) {
       return null;
     }
 
-    return tx.payment.findFirst({ where: { providerReference } });
+    return tx.payment.findFirst({
+      where: { order: { orderCode } },
+      orderBy: { createdAt: 'desc' },
+    });
   }
 
   private statusFromWebhook(
@@ -152,7 +205,9 @@ export class WebhooksService {
     const status = (
       optionalString(payload.status) ??
       optionalString(payload.Status) ??
+      optionalString(payload.ResponseCode) ??
       optionalString(payload.responseCode) ??
+      optionalString(payload.RemoteResponseCode) ??
       ''
     ).toLowerCase();
 

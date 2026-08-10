@@ -15,6 +15,7 @@ import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CancelOrderDto } from './dto/cancel-order.dto';
+import { ClaimOrderDto } from './dto/claim-order.dto';
 import { CreateOrderDto } from './dto/create-order.dto';
 import { CreateTmsOrderDto } from './dto/create-tms-order.dto';
 import { CreateOrderManualQuoteDto } from '../pricing/dto/manual-quote.dto';
@@ -61,8 +62,23 @@ export class OrdersController {
   @ApiOperation({ summary: 'List requested orders visible to drivers' })
   @Roles(ROLES.DRIVER)
   @Get('available')
-  findAvailableForDrivers(): Promise<TransportOrder[]> {
-    return this.service.findAvailableForDrivers();
+  findAvailableForDrivers(
+    @CurrentUser() user: AuthenticatedUser,
+  ): Promise<TransportOrder[]> {
+    return this.service.findAvailableForDrivers(user);
+  }
+
+  @ApiOperation({
+    summary: 'Claim an available order as the authenticated driver',
+  })
+  @Roles(ROLES.DRIVER)
+  @Post(':id/claim')
+  claim(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: ClaimOrderDto,
+  ): Promise<OrderAssignment> {
+    return this.service.claim(user, id, dto);
   }
 
   @ApiOperation({ summary: 'Get order detail' })

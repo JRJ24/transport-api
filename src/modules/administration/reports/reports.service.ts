@@ -59,9 +59,9 @@ export class ReportsService {
 
     const [payments, refunds] = await this.prisma.$transaction([
       this.prisma.payment.groupBy({
-        by: ['status'],
+        by: ['status', 'paymentMethod'],
         where: paymentWhere,
-        orderBy: { status: 'asc' },
+        orderBy: [{ status: 'asc' }, { paymentMethod: 'asc' }],
         _count: { _all: true },
         _sum: { amount: true },
       }),

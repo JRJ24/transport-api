@@ -9,10 +9,16 @@ import { randomBytes } from 'crypto';
 import type { ConfigType } from '@nestjs/config';
 import type {
   CustomerAddress,
+  CustomerCreditAccount,
   CustomerProfile,
   Prisma,
 } from '@generated/prisma/client';
-import { ROLES, STATUS_ACCOUNT, TYPE_CUSTOMER } from '@generated/prisma/enums';
+import {
+  CREDIT_ACCOUNT_STATUS,
+  ROLES,
+  STATUS_ACCOUNT,
+  TYPE_CUSTOMER,
+} from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { hashPassword } from '@/common/utils/hash.util';
 import { authConfig } from '@/config';
@@ -21,7 +27,9 @@ import type { CreateCustomerAddressDto } from './dto/create-customer-address.dto
 import type { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
 import type { CreateTmsCustomerDto } from './dto/create-tms-customer.dto';
 import type { CustomerQueryDto } from './dto/customer-query.dto';
+import type { RequestCustomerCreditDto } from './dto/request-customer-credit.dto';
 import type { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
+import type { UpdateCustomerCreditDto } from './dto/update-customer-credit.dto';
 import type { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
 import type { UpdateTmsCustomerDto } from './dto/update-tms-customer.dto';
 
@@ -86,13 +94,30 @@ export class CustomersService {
         user: { select: SAFE_USER_SELECT },
         customerAddresses: true,
         transportOrders: { select: { id: true, status: true } },
+        creditAccount: true,
       },
       orderBy: { createdAt: 'desc' },
     });
   }
 
-  async getMyProfile(userId: string): Promise<CustomerProfile> {
-    return this.getProfileOrThrow(userId);
+  async getMyProfile(
+    userId: string,
+  ): Promise<
+    CustomerProfile & { creditAccount: CustomerCreditAccount | null }
+  > {
+    const profile = await this.prisma.customerProfile.findFirst({
+      where: { userId },
+      include: { creditAccount: true },
+    });
+
+    if (!profile) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Customer profile not found',
+      });
+    }
+
+    return profile;
   }
 
   async createProfile(
@@ -244,12 +269,20 @@ export class CustomersService {
     this.assertBusinessHasCompanyName(nextCustomerType, nextCompanyName);
 
     return this.prisma.$transaction(async (tx) => {
-      if (dto.fullName !== undefined || dto.email !== undefined || dto.phone !== undefined) {
+      if (
+        dto.fullName !== undefined ||
+        dto.email !== undefined ||
+        dto.phone !== undefined
+      ) {
         await tx.user.update({
           where: { id: existing.userId },
           data: {
-            ...(dto.fullName !== undefined && { fullName: dto.fullName.trim() }),
-            ...(dto.email !== undefined && { email: dto.email.toLowerCase().trim() }),
+            ...(dto.fullName !== undefined && {
+              fullName: dto.fullName.trim(),
+            }),
+            ...(dto.email !== undefined && {
+              email: dto.email.toLowerCase().trim(),
+            }),
             ...(dto.phone !== undefined && { phone: dto.phone.trim() }),
           },
         });
@@ -258,12 +291,18 @@ export class CustomersService {
       const profile = await tx.customerProfile.update({
         where: { id },
         data: {
-          ...(dto.customerType !== undefined && { customerType: dto.customerType }),
-          ...(dto.documentType !== undefined && { documentType: dto.documentType }),
+          ...(dto.customerType !== undefined && {
+            customerType: dto.customerType,
+          }),
+          ...(dto.documentType !== undefined && {
+            documentType: dto.documentType,
+          }),
           ...(dto.documentNumber !== undefined && {
             documentNumber: dto.documentNumber.trim(),
           }),
-          ...(dto.companyName !== undefined && { companyName: nextCompanyName }),
+          ...(dto.companyName !== undefined && {
+            companyName: nextCompanyName,
+          }),
           ...(dto.billingEmail !== undefined && {
             billingEmail: this.optionalEmail(dto.billingEmail),
           }),
@@ -362,6 +401,155 @@ export class CustomersService {
 
       return profile;
     });
+  }
+
+  async upsertCreditAccount(
+    actorUserId: string,
+    id: string,
+    dto: UpdateCustomerCreditDto,
+  ): Promise<CustomerCreditAccount> {
+    const customer = await this.prisma.customerProfile.findUnique({
+      where: { id },
+      select: { id: true, customerType: true },
+    });
+
+    if (!customer) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Customer profile not found',
+      });
+    }
+
+    if (customer.customerType !== TYPE_CUSTOMER.BUSINESS) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Corporate credit is only available for business customers',
+      });
+    }
+
+    const status = dto.status ?? CREDIT_ACCOUNT_STATUS.ACTIVE;
+    const approvedData =
+      status === CREDIT_ACCOUNT_STATUS.ACTIVE
+        ? { approvedBy: actorUserId, approvedAt: new Date() }
+        : { approvedBy: null, approvedAt: null };
+
+    const account = await this.prisma.customerCreditAccount.upsert({
+      where: { customerId: id },
+      update: {
+        creditLimit: dto.creditLimit,
+        creditDays: dto.creditDays ?? undefined,
+        status,
+        notes: this.optionalString(dto.notes),
+        ...approvedData,
+      },
+      create: {
+        customerId: id,
+        creditLimit: dto.creditLimit,
+        creditDays: dto.creditDays ?? 15,
+        balanceUsed: 0,
+        status,
+        notes: this.optionalString(dto.notes),
+        ...approvedData,
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorUserId,
+        action: 'CUSTOMER_CREDIT_UPDATED',
+        entityType: 'CUSTOMER',
+        entityId: id,
+        newValues: {
+          creditLimit: dto.creditLimit,
+          creditDays: account.creditDays,
+          status: account.status,
+        },
+        ipAddress: null,
+        userAgent: null,
+        createdAt: new Date(),
+      },
+    });
+
+    return account;
+  }
+
+  async requestCreditAccount(
+    userId: string,
+    dto: RequestCustomerCreditDto,
+  ): Promise<CustomerCreditAccount> {
+    const profile = await this.prisma.customerProfile.findFirst({
+      where: { userId },
+      include: { creditAccount: true },
+    });
+
+    if (!profile) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Customer profile not found',
+      });
+    }
+
+    if (profile.customerType !== TYPE_CUSTOMER.BUSINESS) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Corporate credit is only available for business customers',
+      });
+    }
+
+    if (profile.creditAccount?.status === CREDIT_ACCOUNT_STATUS.ACTIVE) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'Customer already has active corporate credit',
+      });
+    }
+
+    if (profile.creditAccount?.status === CREDIT_ACCOUNT_STATUS.BLOCKED) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'Corporate credit account is blocked',
+      });
+    }
+
+    const creditDays =
+      dto.creditDays ?? profile.creditAccount?.creditDays ?? 15;
+    const account = await this.prisma.customerCreditAccount.upsert({
+      where: { customerId: profile.id },
+      update: {
+        creditLimit: dto.requestedLimit,
+        creditDays,
+        status: CREDIT_ACCOUNT_STATUS.PENDING,
+        approvedBy: null,
+        approvedAt: null,
+        notes: this.optionalString(dto.notes),
+      },
+      create: {
+        customerId: profile.id,
+        creditLimit: dto.requestedLimit,
+        creditDays,
+        balanceUsed: 0,
+        status: CREDIT_ACCOUNT_STATUS.PENDING,
+        notes: this.optionalString(dto.notes),
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorUserId: userId,
+        action: 'CUSTOMER_CREDIT_REQUESTED',
+        entityType: 'CUSTOMER',
+        entityId: profile.id,
+        newValues: {
+          requestedLimit: dto.requestedLimit,
+          creditDays,
+          status: account.status,
+        },
+        ipAddress: null,
+        userAgent: null,
+        createdAt: new Date(),
+      },
+    });
+
+    return account;
   }
 
   async updateProfile(

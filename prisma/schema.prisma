@@ -36,6 +36,14 @@ enum TYPE_CUSTOMER {
   @@schema("CUSTOMER")
 }
 
+enum CREDIT_ACCOUNT_STATUS {
+  PENDING
+  ACTIVE
+  BLOCKED
+
+  @@schema("CUSTOMER")
+}
+
 enum STATUS_DRIVER {
   AVAILABLE
   BUSY
@@ -257,6 +265,18 @@ enum PAYMENT_METHOD {
   CASH
   TRANSFER
   WALLET
+  CHECK
+  CORPORATE_CREDIT
+
+  @@schema("PAIDS")
+}
+
+enum CHECK_STATUS {
+  RECEIVED
+  DEPOSITED
+  CLEARED
+  BOUNCED
+  CANCELLED
 
   @@schema("PAIDS")
 }
@@ -430,8 +450,29 @@ model CustomerProfile {
   priceQuotes       PriceQuote[]      @relation("CUSTOMER_PRICE")
   transportOrders   TransportOrder[]  @relation("CUSTOMER_TRANSPORT")
   payments          Payment[]         @relation("CUSTOMER_PAYMENTS")
+  creditAccount     CustomerCreditAccount? @relation("CUSTOMER_CREDIT_ACCOUNT")
 
   @@map("customer_profile")
+  @@schema("CUSTOMER")
+}
+
+model CustomerCreditAccount {
+  id          String                @id @default(uuid())
+  customerId  String                @unique @map("customer_id")
+  creditLimit Decimal               @map("credit_limit")
+  balanceUsed Decimal               @default(0) @map("balance_used")
+  creditDays  Int                   @default(15) @map("credit_days")
+  status      CREDIT_ACCOUNT_STATUS @default(PENDING)
+  approvedBy  String?               @map("approved_by")
+  approvedAt  DateTime?             @map("approved_at")
+  notes       String?
+  createdAt   DateTime              @default(now()) @map("created_at")
+  updatedAt   DateTime              @updatedAt @map("updated_at")
+
+  customer CustomerProfile @relation("CUSTOMER_CREDIT_ACCOUNT", fields: [customerId], references: [id])
+
+  @@index([status])
+  @@map("customer_credit_accounts")
   @@schema("CUSTOMER")
 }
 
@@ -932,6 +973,7 @@ model Payment {
   paymentMethod            PAYMENT_METHOD @map("payment_method")
   paymentProvider          String?        @map("payment_provider")
   status                   PAYMENT_STATUS
+  checkStatus              CHECK_STATUS?  @map("check_status")
   providerReference        String?
   transactionId            String?        @map("transaction_id")
   providerSessionId        String?        @unique @map("provider_session_id")
@@ -942,6 +984,8 @@ model Payment {
   retrievalReferenceNumber String?        @map("retrieval_reference_number")
   transactionToken         String?        @map("transaction_token")
   maskedCardNumber         String?        @map("masked_card_number")
+  dispatchAuthorizedAt     DateTime?      @map("dispatch_authorized_at")
+  dispatchAuthorizedBy     String?        @map("dispatch_authorized_by")
   sessionCreatedAt         DateTime?      @map("session_created_at")
   verifiedAt               DateTime?      @map("verified_at")
   expiresAt                DateTime?      @map("expires_at")

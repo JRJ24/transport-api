@@ -1,8 +1,22 @@
 import type {
   CustomerAddress,
+  CustomerCreditAccount,
   CustomerProfile,
 } from '@generated/prisma/client';
-import type { DOCUMENT_TYPE, TYPE_CUSTOMER } from '@generated/prisma/enums';
+import type {
+  CREDIT_ACCOUNT_STATUS,
+  DOCUMENT_TYPE,
+  TYPE_CUSTOMER,
+} from '@generated/prisma/enums';
+
+export interface CustomerCreditAccountResponse {
+  id: string;
+  creditLimit: number;
+  balanceUsed: number;
+  creditDays: number;
+  status: CREDIT_ACCOUNT_STATUS;
+  approvedAt: Date | null;
+}
 
 export interface CustomerProfileResponse {
   id: string;
@@ -11,6 +25,7 @@ export interface CustomerProfileResponse {
   documentNumber: string;
   companyName: string | null;
   billingEmail: string | null;
+  creditAccount?: CustomerCreditAccountResponse | null;
   createdAt: Date;
 }
 
@@ -29,7 +44,7 @@ export interface CustomerAddressResponse {
 }
 
 export function toCustomerProfileResponse(
-  profile: CustomerProfile,
+  profile: CustomerProfile & { creditAccount?: CustomerCreditAccount | null },
 ): CustomerProfileResponse {
   return {
     id: profile.id,
@@ -38,7 +53,23 @@ export function toCustomerProfileResponse(
     documentNumber: profile.documentNumber,
     companyName: profile.companyName,
     billingEmail: profile.billingEmail,
+    creditAccount: profile.creditAccount
+      ? toCustomerCreditAccountResponse(profile.creditAccount)
+      : null,
     createdAt: profile.createdAt,
+  };
+}
+
+export function toCustomerCreditAccountResponse(
+  creditAccount: CustomerCreditAccount,
+): CustomerCreditAccountResponse {
+  return {
+    id: creditAccount.id,
+    creditLimit: Number(creditAccount.creditLimit),
+    balanceUsed: Number(creditAccount.balanceUsed),
+    creditDays: creditAccount.creditDays,
+    status: creditAccount.status,
+    approvedAt: creditAccount.approvedAt,
   };
 }
 

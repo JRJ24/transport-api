@@ -21,13 +21,17 @@ import { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
 import { CreateTmsCustomerDto } from './dto/create-tms-customer.dto';
 import { CustomerQueryDto } from './dto/customer-query.dto';
+import { RequestCustomerCreditDto } from './dto/request-customer-credit.dto';
 import { UpdateCustomerAddressDto } from './dto/update-customer-address.dto';
+import { UpdateCustomerCreditDto } from './dto/update-customer-credit.dto';
 import { UpdateCustomerProfileDto } from './dto/update-customer-profile.dto';
 import { UpdateTmsCustomerDto } from './dto/update-tms-customer.dto';
 import {
   toCustomerAddressResponse,
+  toCustomerCreditAccountResponse,
   toCustomerProfileResponse,
   type CustomerAddressResponse,
+  type CustomerCreditAccountResponse,
   type CustomerProfileResponse,
 } from './presenters/customer.presenter';
 
@@ -76,6 +80,19 @@ export class CustomersController {
     return this.customersService.deactivateFromTms(user.id, id);
   }
 
+  @ApiOperation({
+    summary: 'Approve or update corporate credit for a customer',
+  })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Patch(':id/credit')
+  updateCreditAccount(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: UpdateCustomerCreditDto,
+  ): Promise<unknown> {
+    return this.customersService.upsertCreditAccount(user.id, id, dto);
+  }
+
   @ApiOperation({ summary: 'Get my customer profile' })
   @Get('me')
   async getMyProfile(
@@ -83,6 +100,17 @@ export class CustomersController {
   ): Promise<CustomerProfileResponse> {
     return toCustomerProfileResponse(
       await this.customersService.getMyProfile(user.id),
+    );
+  }
+
+  @ApiOperation({ summary: 'Request corporate credit for my business profile' })
+  @Post('me/credit-request')
+  async requestMyCredit(
+    @CurrentUser() user: AuthenticatedUser,
+    @Body() dto: RequestCustomerCreditDto,
+  ): Promise<CustomerCreditAccountResponse> {
+    return toCustomerCreditAccountResponse(
+      await this.customersService.requestCreditAccount(user.id, dto),
     );
   }
 

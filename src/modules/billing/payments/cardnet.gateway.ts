@@ -5,7 +5,9 @@ import {
   Logger,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
+import type { Prisma } from '@generated/prisma/client';
 import { paymentConfig } from '@/config';
+import { PrismaService } from '@/database/prisma.service';
 
 export interface CardnetSessionResponse {
   SESSION: string;
@@ -19,6 +21,7 @@ export class CardnetGateway {
   constructor(
     @Inject(paymentConfig.KEY)
     private readonly config: ConfigType<typeof paymentConfig>,
+    private readonly prisma: PrismaService,
   ) {}
 
   async createSession(
@@ -40,6 +43,14 @@ export class CardnetGateway {
       signal: AbortSignal.timeout(15_000),
     });
     const rawBody = await response.text();
+
+    await this.logExternalApi(
+      url,
+      payload,
+      rawBody,
+      response.status,
+      response.ok,
+    );
 
     if (!response.ok) {
       this.logger.error(
@@ -83,6 +94,14 @@ export class CardnetGateway {
     });
     const rawBody = await response.text();
 
+    await this.logExternalApi(
+      url,
+      { session },
+      rawBody,
+      response.status,
+      response.ok,
+    );
+
     if (!response.ok) {
       throw new BadGatewayException(
         `No se pudo consultar el pago en CardNET: ${response.status}`,
@@ -110,5 +129,55 @@ export class CardnetGateway {
     return typeof value === 'string' && value.trim().length > 0
       ? value.trim()
       : undefined;
+  }
+
+  private async logExternalApi(
+    endpoint: string,
+    requestPayload: Record<string, unknown>,
+    rawBody: string,
+    statusCode: number,
+    success: boolean,
+  ): Promise<void> {
+    try {
+      await this.prisma.externalApiLog.create({
+        data: {
+          provider: 'cardnet',
+          endpoint: this.safeEndpoint(endpoint),
+          requestPayload: requestPayload as Prisma.InputJsonObject,
+          responsePayload: this.responsePayload(rawBody),
+          statusCode,
+          success,
+          createdAt: new Date(),
+        },
+      });
+    } catch (error) {
+      this.logger.warn(
+        `CardNET external API log failed: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
+  }
+
+  private responsePayload(rawBody: string): Prisma.InputJsonObject {
+    try {
+      const parsed = JSON.parse(rawBody) as unknown;
+
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch {
+      return { rawBody: rawBody.slice(0, 5000) };
+    }
+
+    return { rawBody: rawBody.slice(0, 5000) };
+  }
+
+  private safeEndpoint(endpoint: string): string {
+    try {
+      const url = new URL(endpoint);
+      url.search = '';
+      return url.toString();
+    } catch {
+      return endpoint.split('?')[0] ?? endpoint;
+    }
   }
 }

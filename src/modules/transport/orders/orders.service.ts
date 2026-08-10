@@ -17,7 +17,9 @@ import {
   STATUS_ACCOUNT,
   STATUS_DRIVER,
   STATUS_ORDERS,
+  STATUS_VEHICLE,
   STOP_TYPE,
+  VERIFICATION_STATUS,
 } from '@generated/prisma/enums';
 import type { OrderAssignment } from '@generated/prisma/client';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
@@ -34,6 +36,7 @@ import {
 } from '../pricing/pricing.service';
 import type { CreateOrderManualQuoteDto } from '../pricing/dto/manual-quote.dto';
 import type { CancelOrderDto } from './dto/cancel-order.dto';
+import type { ClaimOrderDto } from './dto/claim-order.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
 import {
   TMS_ORDER_SUBMIT_MODE,
@@ -113,6 +116,22 @@ const MANUAL_QUOTE_STATUSES = new Set<STATUS_ORDERS>([
   STATUS_ORDERS.REQUESTED,
   STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION,
 ]);
+
+const DISPATCHABLE_PAYMENT_STATUSES: PAYMENT_STATUS[] = [
+  PAYMENT_STATUS.PAID,
+  PAYMENT_STATUS.AUTHORIZED,
+];
+
+const ACTIVE_ASSIGNMENT_STATUSES: ASSIGNMENT_STATUS[] = [
+  ASSIGNMENT_STATUS.PENDING,
+  ASSIGNMENT_STATUS.ACCEPTED,
+];
+
+const ACTIVE_DRIVER_ORDER_STATUSES: STATUS_ORDERS[] = [
+  STATUS_ORDERS.ASSIGNED,
+  STATUS_ORDERS.ACCEPTED,
+  STATUS_ORDERS.IN_PROGRESS,
+];
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -655,15 +674,62 @@ export class OrdersService {
     });
   }
 
-  findAvailableForDrivers(): Promise<TransportOrder[]> {
+  async findAvailableForDrivers(
+    user: AuthenticatedUser,
+  ): Promise<TransportOrder[]> {
+    const driver = await this.prisma.driverProfile.findFirst({
+      where: { userId: user.id },
+      select: {
+        id: true,
+        availabilityStatus: true,
+        verificationStatus: true,
+        licenseExpiration: true,
+      },
+    });
+
+    if (
+      !driver ||
+      driver.availabilityStatus !== STATUS_DRIVER.AVAILABLE ||
+      driver.verificationStatus !== VERIFICATION_STATUS.APPROVED ||
+      driver.licenseExpiration.getTime() <= Date.now()
+    ) {
+      return [];
+    }
+
+    const activeAssignment = await this.prisma.orderAssignment.findFirst({
+      where: {
+        driverId: driver.id,
+        assignmentStatus: { in: ACTIVE_ASSIGNMENT_STATUSES },
+        order: { status: { in: ACTIVE_DRIVER_ORDER_STATUSES } },
+      },
+      select: { id: true },
+    });
+
+    if (activeAssignment) {
+      return [];
+    }
+
+    const vehicles = await this.prisma.vehicle.findMany({
+      where: { driverId: driver.id, status: STATUS_VEHICLE.ACTIVE },
+      select: { categoryId: true },
+    });
+    const categoryIds = [
+      ...new Set(vehicles.map((vehicle) => vehicle.categoryId)),
+    ];
+
+    if (categoryIds.length === 0) {
+      return [];
+    }
+
     return this.prisma.transportOrder.findMany({
       where: {
         status: STATUS_ORDERS.REQUESTED,
-        paymentStatus: PAYMENT_STATUS.PAID,
+        paymentStatus: { in: DISPATCHABLE_PAYMENT_STATUSES },
+        vehicleCategoryId: { in: categoryIds },
         orderAssignments: {
           none: {
             assignmentStatus: {
-              in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+              in: ACTIVE_ASSIGNMENT_STATUSES,
             },
           },
         },
@@ -671,6 +737,14 @@ export class OrdersService {
       include: ORDER_INCLUDE,
       orderBy: { createdAt: 'desc' },
     });
+  }
+
+  claim(
+    user: AuthenticatedUser,
+    orderId: string,
+    dto: ClaimOrderDto,
+  ): Promise<OrderAssignment> {
+    return this.assignments.claimOrder(user, orderId, dto.vehicleId);
   }
 
   async findOne(
@@ -883,7 +957,7 @@ export class OrdersService {
           metadata: {
             previousStatus: current.status,
             status: STATUS_ORDERS.PENDING_PAYMENT,
-            paymentProvider: 'cardnet',
+            paymentProvider: 'pending_selection',
           },
           latitude: null,
           longitude: null,

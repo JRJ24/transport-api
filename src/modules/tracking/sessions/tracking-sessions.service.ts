@@ -342,14 +342,14 @@ export class TrackingSessionsService {
       ? {
           orderId,
           assignmentStatus: {
-            in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+            in: [ASSIGNMENT_STATUS.ACCEPTED],
           },
         }
       : {
           orderId,
           driverId: (await this.getDriverProfile(user)).id,
           assignmentStatus: {
-            in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+            in: [ASSIGNMENT_STATUS.ACCEPTED],
           },
         };
 
