@@ -25,7 +25,7 @@ export class CreatePaymentDto {
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  @Min(0)
+  @Min(1)
   amount?: number;
 
   @ApiPropertyOptional({ example: 'DOP' })

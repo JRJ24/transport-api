@@ -1,6 +1,11 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
-import type { ROLES, STATUS_ACCOUNT } from '@generated/prisma/enums';
+import type {
+  DOCUMENT_TYPE,
+  ROLES,
+  STATUS_ACCOUNT,
+  TYPE_CUSTOMER,
+} from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { hashPassword } from '@/common/utils/hash.util';
 import {
@@ -27,6 +32,16 @@ export interface CreateUserInput {
   phone: string;
   password: string;
   roles: ROLES[];
+}
+
+export interface CreateCustomerUserInput extends CreateUserInput {
+  profile: {
+    customerType: TYPE_CUSTOMER;
+    documentType: DOCUMENT_TYPE;
+    documentNumber: string;
+    companyName?: string;
+    billingEmail?: string;
+  };
 }
 
 @Injectable()
@@ -84,6 +99,42 @@ export class UsersService {
       },
       include: USER_WITH_ROLES_INCLUDE,
     });
+  }
+
+  async createCustomerWithProfile(
+    input: CreateCustomerUserInput,
+  ): Promise<UserWithRoles> {
+    const passwordHash = await hashPassword(
+      input.password,
+      this.auth.bcryptSaltRounds,
+    );
+
+    return this.prisma.$transaction((tx) =>
+      tx.user.create({
+        data: {
+          fullName: input.fullName.trim(),
+          email: input.email.toLowerCase().trim(),
+          phone: input.phone.trim(),
+          passwordHash,
+          userRoles: {
+            create: input.roles.map((code) => ({
+              rol: { connect: { code } },
+            })),
+          },
+          customerProfile: {
+            create: {
+              customerType: input.profile.customerType,
+              documentType: input.profile.documentType,
+              documentNumber: input.profile.documentNumber.trim(),
+              companyName: optionalString(input.profile.companyName),
+              billingEmail: optionalEmail(input.profile.billingEmail),
+              createdAt: new Date(),
+            },
+          },
+        },
+        include: USER_WITH_ROLES_INCLUDE,
+      }),
+    );
   }
 
   async updateProfile(
@@ -146,4 +197,16 @@ export class UsersService {
       include: USER_WITH_ROLES_INCLUDE,
     });
   }
+}
+
+function optionalString(value: string | undefined): string | null {
+  const trimmed = value?.trim();
+
+  return trimmed ? trimmed : null;
+}
+
+function optionalEmail(value: string | undefined): string | null {
+  const trimmed = value?.toLowerCase().trim();
+
+  return trimmed ? trimmed : null;
 }

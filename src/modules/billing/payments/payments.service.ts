@@ -74,6 +74,7 @@ type CardnetOrder = Prisma.TransportOrderGetPayload<{
       };
     };
     orderStops: true;
+    payments: true;
   };
 }>;
 
@@ -136,11 +137,21 @@ export class PaymentsService {
     });
   }
 
-  findOne(id: string): Promise<Payment | null> {
-    return this.prisma.payment.findUnique({
+  async findOne(id: string, user: AuthenticatedUser): Promise<Payment | null> {
+    const payment = await this.prisma.payment.findUnique({
       where: { id },
-      include: { paymentsTransactions: true, refunds: true },
+      include: {
+        order: { include: { customer: true } },
+        paymentsTransactions: true,
+        refunds: true,
+      },
     });
+
+    if (payment) {
+      this.assertCanReadPayment(payment, user);
+    }
+
+    return payment;
   }
 
   async create(
@@ -176,6 +187,7 @@ export class PaymentsService {
       where: { id: dto.orderId },
       include: {
         customer: { include: { user: { select: SAFE_USER_SELECT } } },
+        payments: { orderBy: { createdAt: 'desc' } },
       },
     });
 
@@ -197,14 +209,9 @@ export class PaymentsService {
       });
     }
 
-    const amount = order.totalAmount;
+    this.assertOrderNotAlreadyDispatchable(order);
 
-    if (amount === null) {
-      throw new BadRequestException({
-        code: ERROR_CODES.BAD_REQUEST,
-        message: 'Order has no calculated amount available for payment',
-      });
-    }
+    const amount = this.payableAmount(order, dto.amount);
 
     const payment = await this.prisma.payment.create({
       data: {
@@ -271,11 +278,11 @@ export class PaymentsService {
     user: AuthenticatedUser,
   ): Promise<CreatePaymentResult> {
     const order = await this.loadPayableOrder(dto.orderId);
-    const amount = this.payableAmount(order.totalAmount, dto.amount);
+    this.assertOrderNotAlreadyDispatchable(order);
+
+    const amount = this.payableAmount(order, dto.amount);
     const receivedAt = dto.receivedAt ?? new Date();
     const providerReference = `check:${dto.bankName.trim()}:${dto.checkNumber.trim()}`;
-
-    this.assertOrderNotAlreadyDispatchable(order);
 
     const [payment, transaction] = await this.prisma.$transaction(
       async (tx) => {
@@ -378,7 +385,7 @@ export class PaymentsService {
 
     this.assertOrderNotAlreadyDispatchable(order);
 
-    const amount = this.payableAmount(order.totalAmount, dto.amount);
+    const amount = this.payableAmount(order, dto.amount);
     const nextBalance = Number(account.balanceUsed) + amount;
 
     if (nextBalance > Number(account.creditLimit)) {
@@ -421,9 +428,39 @@ export class PaymentsService {
           },
         });
 
-        await tx.customerCreditAccount.update({
-          where: { id: account.id },
+        const creditUpdate = await tx.customerCreditAccount.updateMany({
+          where: {
+            id: account.id,
+            status: CREDIT_ACCOUNT_STATUS.ACTIVE,
+            creditLimit: account.creditLimit,
+            balanceUsed: { lte: Number(account.creditLimit) - amount },
+          },
           data: { balanceUsed: { increment: amount } },
+        });
+
+        if (creditUpdate.count !== 1) {
+          throw new ConflictException({
+            code: ERROR_CODES.RESOURCE_CONFLICT,
+            message: 'Corporate credit limit would be exceeded',
+          });
+        }
+
+        const creditAfter = await tx.customerCreditAccount.findUniqueOrThrow({
+          where: { id: account.id },
+          select: { balanceUsed: true },
+        });
+
+        await tx.customerCreditMovement.create({
+          data: {
+            creditAccountId: account.id,
+            orderId: order.id,
+            paymentId: payment.id,
+            movementType: 'AUTHORIZATION',
+            amount,
+            balanceAfter: creditAfter.balanceUsed,
+            createdBy: user.id,
+            notes: 'notes' in dto ? (dto.notes?.trim() ?? null) : null,
+          },
         });
         await this.syncOrderAfterPayment(tx, payment);
 
@@ -481,12 +518,7 @@ export class PaymentsService {
       });
     }
 
-    if (order.totalAmount === null || Number(order.totalAmount) <= 0) {
-      throw new BadRequestException({
-        code: ERROR_CODES.BAD_REQUEST,
-        message: 'Order has no payable amount',
-      });
-    }
+    const amount = this.payableAmount(order);
 
     const reusable = order.payments.find(
       (payment) =>
@@ -518,7 +550,7 @@ export class PaymentsService {
       data: {
         orderId: order.id,
         customerId: order.customerId,
-        amount: order.totalAmount,
+        amount,
         currency: 'DOP',
         paymentMethod: PAYMENT_METHOD.CARD,
         paymentProvider: 'cardnet',
@@ -527,7 +559,7 @@ export class PaymentsService {
         transactionId,
       },
     });
-    const payload = this.buildCardnetPayload(order, transactionId, ip);
+    const payload = this.buildCardnetPayload(order, transactionId, ip, amount);
 
     try {
       const session = await this.cardnetGateway.createSession(payload);
@@ -721,7 +753,7 @@ export class PaymentsService {
         },
       });
 
-      await this.syncOrderAfterPayment(tx, { ...payment, status });
+      await this.syncOrderAfterPayment(tx, updatedPayment);
 
       return updatedPayment;
     });
@@ -754,10 +786,7 @@ export class PaymentsService {
         },
       });
 
-      await tx.transportOrder.update({
-        where: { id: payment.orderId },
-        data: { paymentStatus: PAYMENT_STATUS.PENDING },
-      });
+      await this.syncOrderAfterPayment(tx, updatedPayment);
 
       await tx.paymentTransaction.create({
         data: {
@@ -859,13 +888,39 @@ export class PaymentsService {
     return order;
   }
 
-  private payableAmount(totalAmount: unknown, override?: number): number {
-    const amount = override ?? Number(totalAmount);
+  private payableAmount(
+    order: {
+      totalAmount: unknown;
+      payments: Pick<Payment, 'amount' | 'paymentMethod' | 'status'>[];
+    },
+    override?: number,
+  ): number {
+    const totalAmount = Number(order.totalAmount);
+
+    if (!Number.isFinite(totalAmount) || totalAmount <= 0) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Order has no payable amount',
+      });
+    }
+
+    const remainingAmount = Math.max(
+      0,
+      totalAmount - this.dispatchAuthorizedAmount(order.payments),
+    );
+    const amount = override ?? remainingAmount;
 
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new BadRequestException({
         code: ERROR_CODES.BAD_REQUEST,
-        message: 'Order has no payable amount',
+        message: 'Order has no pending payable amount',
+      });
+    }
+
+    if (amount > remainingAmount) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'Payment amount exceeds the order pending balance',
       });
     }
 
@@ -873,17 +928,20 @@ export class PaymentsService {
   }
 
   private assertOrderNotAlreadyDispatchable(order: {
+    totalAmount: unknown;
     paymentStatus: PAYMENT_STATUS;
-    payments: { status: PAYMENT_STATUS; paymentMethod: PAYMENT_METHOD }[];
+    payments: Pick<Payment, 'amount' | 'status' | 'paymentMethod'>[];
   }): void {
-    const hasDispatchablePayment = order.payments.some((payment) =>
-      this.isDispatchAuthorizedPayment(payment),
-    );
+    const totalAmount = Number(order.totalAmount);
+    const isCovered =
+      Number.isFinite(totalAmount) &&
+      totalAmount > 0 &&
+      this.dispatchAuthorizedAmount(order.payments) >= totalAmount;
 
     if (
       order.paymentStatus === PAYMENT_STATUS.PAID ||
       order.paymentStatus === PAYMENT_STATUS.AUTHORIZED ||
-      hasDispatchablePayment
+      isCovered
     ) {
       throw new ConflictException({
         code: ERROR_CODES.RESOURCE_CONFLICT,
@@ -898,24 +956,44 @@ export class PaymentsService {
   ): Promise<void> {
     const order = await tx.transportOrder.findUnique({
       where: { id: payment.orderId },
-      select: { status: true },
+      select: {
+        status: true,
+        totalAmount: true,
+        payments: {
+          select: { amount: true, paymentMethod: true, status: true },
+        },
+      },
     });
 
-    const dispatchAuthorized = this.isDispatchAuthorizedPayment(payment);
-    const nextPaymentStatus = dispatchAuthorized
-      ? payment.status
-      : payment.status === PAYMENT_STATUS.FAILED ||
-          payment.status === PAYMENT_STATUS.CANCELLED ||
-          payment.status === PAYMENT_STATUS.EXPIRED
-        ? PAYMENT_STATUS.PENDING
-        : payment.status;
+    if (!order) {
+      return;
+    }
+
+    const totalAmount = Number(order.totalAmount);
+    const covered =
+      Number.isFinite(totalAmount) &&
+      totalAmount > 0 &&
+      this.dispatchAuthorizedAmount(order.payments) >= totalAmount;
+    const hasAuthorizedManual = order.payments.some((candidate) =>
+      this.isDispatchAuthorizedPayment(candidate),
+    );
+    const hasProcessing = order.payments.some((candidate) =>
+      candidate.status === PAYMENT_STATUS.PENDING ||
+      candidate.status === PAYMENT_STATUS.PROCESSING,
+    );
+    const nextPaymentStatus = covered
+      ? hasAuthorizedManual
+        ? PAYMENT_STATUS.AUTHORIZED
+        : PAYMENT_STATUS.PAID
+      : hasProcessing
+        ? PAYMENT_STATUS.PROCESSING
+        : PAYMENT_STATUS.PENDING;
 
     await tx.transportOrder.update({
       where: { id: payment.orderId },
       data: {
         paymentStatus: nextPaymentStatus,
-        ...(dispatchAuthorized &&
-          order &&
+        ...(covered &&
           ORDER_STATUSES_AWAITING_PAYMENT.has(order.status) && {
             status: STATUS_ORDERS.REQUESTED,
           }),
@@ -936,10 +1014,23 @@ export class PaymentsService {
     );
   }
 
+  private dispatchAuthorizedAmount(
+    payments: Pick<Payment, 'amount' | 'paymentMethod' | 'status'>[],
+  ): number {
+    return payments.reduce((total, payment) => {
+      if (!this.isDispatchAuthorizedPayment(payment)) {
+        return total;
+      }
+
+      return total + Number(payment.amount);
+    }, 0);
+  }
+
   private buildCardnetPayload(
     order: CardnetOrder,
     transactionId: string,
     ip: string,
+    amount: number,
   ): Record<string, string> {
     this.assertCardnetConfig();
 
@@ -969,7 +1060,7 @@ export class PaymentsService {
       OrdenId: order.orderCode,
       TransactionId: transactionId,
       Tax: this.formatCardnetAmount(this.paymentsConfig.cardnetTaxAmount, true),
-      Amount: this.formatCardnetAmount(order.totalAmount),
+      Amount: this.formatCardnetAmount(amount),
       MerchantName: this.paymentsConfig.cardnetMerchantName,
       Ipclient: ip || '127.0.0.1',
       '3DS_email': email,

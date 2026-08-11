@@ -29,7 +29,7 @@ export class RegisterCheckPaymentDto {
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  @Min(0)
+  @Min(1)
   amount?: number;
 
   @ApiPropertyOptional({ example: '2026-08-10T14:30:00.000Z' })

@@ -1,5 +1,6 @@
-import { Injectable } from '@nestjs/common';
-import { ROLES } from '@generated/prisma/enums';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { ROLES, TYPE_CUSTOMER } from '@generated/prisma/enums';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { RequestContext } from '@/common/interfaces/request-context.interface';
 import { UsersService } from '../../../users/users.service';
 import type { AuthResult } from '../../domain/auth-result.interface';
@@ -23,12 +24,21 @@ export class RegisterUseCase {
     dto: RegisterDto,
     context: RequestContext,
   ): Promise<AuthResult> {
-    const user = await this.usersService.create({
+    this.assertBusinessProfile(dto);
+
+    const user = await this.usersService.createCustomerWithProfile({
       fullName: dto.fullName,
       email: dto.email,
       phone: dto.phone,
       password: dto.password,
       roles: [ROLES.CUSTOMER],
+      profile: {
+        customerType: dto.customerType,
+        documentType: dto.documentType,
+        documentNumber: dto.documentNumber,
+        companyName: dto.companyName,
+        billingEmail: dto.billingEmail,
+      },
     });
 
     await this.audit.record({
@@ -41,5 +51,17 @@ export class RegisterUseCase {
     });
 
     return this.sessionIssuer.issue(user, dto, context);
+  }
+
+  private assertBusinessProfile(dto: RegisterDto): void {
+    if (
+      dto.customerType === TYPE_CUSTOMER.BUSINESS &&
+      !dto.companyName?.trim()
+    ) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Business customers must provide a company name',
+      });
+    }
   }
 }

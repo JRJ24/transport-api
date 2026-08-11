@@ -172,8 +172,11 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Get payment' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
   @Get(':id')
-  findOne(@Param('id', ParseUUIDPipe) id: string): Promise<Payment | null> {
-    return this.service.findOne(id);
+  findOne(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<Payment | null> {
+    return this.service.findOne(id, user);
   }
 
   @ApiOperation({ summary: 'Update internal/mock payment status' })
@@ -204,8 +207,10 @@ function extractCardnetSession(
   for (const value of [
     body?.SESSION,
     body?.Session,
+    body?.session,
     query?.SESSION,
     query?.Session,
+    query?.session,
   ]) {
     if (typeof value === 'string' && value.trim().length > 0) {
       return value.trim();

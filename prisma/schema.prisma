@@ -40,6 +40,8 @@ enum CREDIT_ACCOUNT_STATUS {
   PENDING
   ACTIVE
   BLOCKED
+  REJECTED
+  CLOSED
 
   @@schema("CUSTOMER")
 }
@@ -368,7 +370,7 @@ model User {
 
   userRoles         UserRole[]        @relation("USERS")
   sessions          UserSession[]     @relation("USER_SESSIONS")
-  customerProfiles  CustomerProfile[] @relation("USERS_CUSTOMER")
+  customerProfile   CustomerProfile?  @relation("USERS_CUSTOMER")
   driverProfiles    DriverProfile[]   @relation("DRIVER_USER")
   orderAssignments  OrderAssignment[] @relation("assigned_user")
   deliveryProofs    DeliveryProof[]   @relation("USER_DELIVERY")
@@ -437,7 +439,7 @@ model UserSession {
 
 model CustomerProfile {
   id             String        @id @default(uuid())
-  userId         String        @map("user_id")
+  userId         String        @unique @map("user_id")
   customerType   TYPE_CUSTOMER @map("customer_type")
   documentType   DOCUMENT_TYPE @map("document_type")
   documentNumber String        @map("document_number")
@@ -452,6 +454,7 @@ model CustomerProfile {
   payments          Payment[]         @relation("CUSTOMER_PAYMENTS")
   creditAccount     CustomerCreditAccount? @relation("CUSTOMER_CREDIT_ACCOUNT")
 
+  @@unique([documentType, documentNumber])
   @@map("customer_profile")
   @@schema("CUSTOMER")
 }
@@ -469,10 +472,34 @@ model CustomerCreditAccount {
   createdAt   DateTime              @default(now()) @map("created_at")
   updatedAt   DateTime              @updatedAt @map("updated_at")
 
-  customer CustomerProfile @relation("CUSTOMER_CREDIT_ACCOUNT", fields: [customerId], references: [id])
+  customer  CustomerProfile          @relation("CUSTOMER_CREDIT_ACCOUNT", fields: [customerId], references: [id])
+  movements CustomerCreditMovement[] @relation("CUSTOMER_CREDIT_MOVEMENTS")
 
   @@index([status])
   @@map("customer_credit_accounts")
+  @@schema("CUSTOMER")
+}
+
+model CustomerCreditMovement {
+  id              String   @id @default(uuid())
+  creditAccountId String   @map("credit_account_id")
+  orderId         String?  @map("order_id")
+  paymentId       String?  @map("payment_id")
+  movementType    String   @map("movement_type")
+  amount          Decimal
+  balanceAfter    Decimal  @map("balance_after")
+  notes           String?
+  createdBy       String?  @map("created_by")
+  createdAt       DateTime @default(now()) @map("created_at")
+
+  creditAccount CustomerCreditAccount @relation("CUSTOMER_CREDIT_MOVEMENTS", fields: [creditAccountId], references: [id])
+  order         TransportOrder?       @relation("ORDER_CREDIT_MOVEMENTS", fields: [orderId], references: [id])
+  payment       Payment?              @relation("PAYMENT_CREDIT_MOVEMENTS", fields: [paymentId], references: [id])
+
+  @@index([creditAccountId, createdAt])
+  @@index([orderId])
+  @@index([paymentId])
+  @@map("customer_credit_movements")
   @@schema("CUSTOMER")
 }
 
@@ -691,6 +718,7 @@ model TransportOrder {
   incidents          Incident[]          @relation("ORDER_INCIDENTS")
   payments           Payment[]           @relation("ORDERS_PAYMENTS")
   refunds            Refund[]            @relation("REFUNDS_ORDERS")
+  creditMovements    CustomerCreditMovement[] @relation("ORDER_CREDIT_MOVEMENTS")
 
   @@index([orderCode])
   @@index([customerId])
@@ -997,6 +1025,7 @@ model Payment {
   customer             CustomerProfile      @relation("CUSTOMER_PAYMENTS", fields: [customerId], references: [id])
   paymentsTransactions PaymentTransaction[] @relation("PAYMENTS_TRANSACTIONS")
   refunds              Refund[]             @relation("PAYMENT_REFUNDS")
+  creditMovements      CustomerCreditMovement[] @relation("PAYMENT_CREDIT_MOVEMENTS")
 
   @@unique([paymentProvider, transactionId])
   @@index([orderId])

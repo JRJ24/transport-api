@@ -18,7 +18,7 @@ export class ApproveCorporateCreditPaymentDto {
   @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  @Min(0)
+  @Min(1)
   amount?: number;
 
   @ApiPropertyOptional({ example: 'Autorizado contra cuenta B2B' })

@@ -300,9 +300,11 @@ export class CustomersService {
           ...(dto.documentNumber !== undefined && {
             documentNumber: dto.documentNumber.trim(),
           }),
-          ...(dto.companyName !== undefined && {
-            companyName: nextCompanyName,
-          }),
+          ...(nextCustomerType === TYPE_CUSTOMER.INDIVIDUAL
+            ? { companyName: null }
+            : dto.companyName !== undefined
+              ? { companyName: nextCompanyName }
+              : {}),
           ...(dto.billingEmail !== undefined && {
             billingEmail: this.optionalEmail(dto.billingEmail),
           }),
@@ -313,6 +315,18 @@ export class CustomersService {
           transportOrders: { select: { id: true, status: true } },
         },
       });
+
+      if (
+        existing.customerType === TYPE_CUSTOMER.BUSINESS &&
+        nextCustomerType === TYPE_CUSTOMER.INDIVIDUAL
+      ) {
+        await this.closeCreditAccount(
+          tx,
+          existing.id,
+          actorUserId,
+          'Credit line closed by TMS after switching to individual profile',
+        );
+      }
 
       await tx.auditLog.create({
         data: {
@@ -410,7 +424,11 @@ export class CustomersService {
   ): Promise<CustomerCreditAccount> {
     const customer = await this.prisma.customerProfile.findUnique({
       where: { id },
-      select: { id: true, customerType: true },
+      select: {
+        id: true,
+        customerType: true,
+        creditAccount: { select: { balanceUsed: true } },
+      },
     });
 
     if (!customer) {
@@ -424,6 +442,15 @@ export class CustomersService {
       throw new BadRequestException({
         code: ERROR_CODES.BAD_REQUEST,
         message: 'Corporate credit is only available for business customers',
+      });
+    }
+
+    const balanceUsed = Number(customer.creditAccount?.balanceUsed ?? 0);
+
+    if (dto.creditLimit < balanceUsed) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'Credit limit cannot be lower than the used balance',
       });
     }
 
@@ -565,23 +592,43 @@ export class CustomersService {
 
     this.assertBusinessHasCompanyName(nextCustomerType, nextCompanyName);
 
-    return this.prisma.customerProfile.update({
-      where: { id: profile.id },
-      data: {
-        ...(dto.customerType !== undefined && {
-          customerType: dto.customerType,
-        }),
-        ...(dto.documentType !== undefined && {
-          documentType: dto.documentType,
-        }),
-        ...(dto.documentNumber !== undefined && {
-          documentNumber: dto.documentNumber.trim(),
-        }),
-        ...(dto.companyName !== undefined && { companyName: nextCompanyName }),
-        ...(dto.billingEmail !== undefined && {
-          billingEmail: this.optionalEmail(dto.billingEmail),
-        }),
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const updated = await tx.customerProfile.update({
+        where: { id: profile.id },
+        data: {
+          ...(dto.customerType !== undefined && {
+            customerType: dto.customerType,
+          }),
+          ...(dto.documentType !== undefined && {
+            documentType: dto.documentType,
+          }),
+          ...(dto.documentNumber !== undefined && {
+            documentNumber: dto.documentNumber.trim(),
+          }),
+          ...(nextCustomerType === TYPE_CUSTOMER.INDIVIDUAL
+            ? { companyName: null }
+            : dto.companyName !== undefined
+              ? { companyName: nextCompanyName }
+              : {}),
+          ...(dto.billingEmail !== undefined && {
+            billingEmail: this.optionalEmail(dto.billingEmail),
+          }),
+        },
+      });
+
+      if (
+        profile.customerType === TYPE_CUSTOMER.BUSINESS &&
+        nextCustomerType === TYPE_CUSTOMER.INDIVIDUAL
+      ) {
+        await this.closeCreditAccount(
+          tx,
+          profile.id,
+          userId,
+          'Credit line closed after switching to individual profile',
+        );
+      }
+
+      return updated;
     });
   }
 
@@ -730,6 +777,41 @@ export class CustomersService {
     }
 
     return profile;
+  }
+
+  private async closeCreditAccount(
+    tx: Prisma.TransactionClient,
+    customerId: string,
+    actorUserId: string,
+    notes: string,
+  ): Promise<void> {
+    const account = await tx.customerCreditAccount.findUnique({
+      where: { customerId },
+    });
+
+    if (!account || account.status === CREDIT_ACCOUNT_STATUS.CLOSED) {
+      return;
+    }
+
+    const closed = await tx.customerCreditAccount.update({
+      where: { id: account.id },
+      data: {
+        status: CREDIT_ACCOUNT_STATUS.CLOSED,
+        approvedBy: null,
+        approvedAt: null,
+      },
+    });
+
+    await tx.customerCreditMovement.create({
+      data: {
+        creditAccountId: account.id,
+        movementType: 'CLOSED',
+        amount: 0,
+        balanceAfter: closed.balanceUsed,
+        createdBy: actorUserId,
+        notes,
+      },
+    });
   }
 
   private assertBusinessHasCompanyName(

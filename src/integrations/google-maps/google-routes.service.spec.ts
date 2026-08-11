@@ -11,7 +11,14 @@ function makeService(serverApiKey: string): GoogleRoutesService {
   const cfg: Cfg = {
     serverApiKey,
     routesBaseUrl: 'https://routes.googleapis.com',
+    placesBaseUrl: 'https://places.googleapis.com/v1',
+    geocodingBaseUrl: 'https://maps.googleapis.com/maps/api/geocode/json',
+    addressValidationBaseUrl: 'https://addressvalidation.googleapis.com/v1:validateAddress',
+    roadsBaseUrl: 'https://roads.googleapis.com/v1',
+    routeOptimizationBaseUrl: 'https://routeoptimization.googleapis.com',
+    routeOptimizationProjectId: '',
     routesTimeoutMs: 10000,
+    mapsTimeoutMs: 10000,
   };
   return new GoogleRoutesService(cfg);
 }
