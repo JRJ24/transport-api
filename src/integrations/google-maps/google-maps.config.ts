@@ -30,4 +30,17 @@ export const googleMapsConfig = registerAs('googleMaps', () => ({
     process.env.GOOGLE_ROUTE_OPTIMIZATION_PROJECT_ID ?? '',
   routesTimeoutMs: Number(process.env.GOOGLE_ROUTES_TIMEOUT_MS ?? 10_000),
   mapsTimeoutMs: Number(process.env.GOOGLE_MAPS_TIMEOUT_MS ?? 10_000),
+  /**
+   * Opt in to the offline stubs explicitly. A key that is present but dead
+   * (billing off, API not enabled) must raise a typed error, never silently
+   * serve fake Santo Domingo coordinates - that is what made the geocoding
+   * failure invisible in the first place.
+   */
+  useMocks: process.env.GOOGLE_MAPS_USE_MOCKS === 'true',
+  /**
+   * Which distance feeds the price: 'road' uses the real driving distance from
+   * the Routes API, 'straight-line' keeps the legacy haversine figure.
+   */
+  pricingDistance: (process.env.ROUTE_PRICING_DISTANCE ?? 'road') as
+    'road' | 'straight-line',
 }));

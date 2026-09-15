@@ -17,6 +17,24 @@ export const ERROR_CODES = {
   RATE_LIMITED: 'RATE_LIMITED',
   DOMAIN_RULE_VIOLATION: 'DOMAIN_RULE_VIOLATION',
   INTERNAL_ERROR: 'INTERNAL_ERROR',
+
+  // Upstream (third-party) failures. Kept distinct from INTERNAL_ERROR so the
+  // clients can tell "we are broken" from "the provider is unreachable".
+  UPSTREAM_ERROR: 'UPSTREAM_ERROR',
+  UPSTREAM_TIMEOUT: 'UPSTREAM_TIMEOUT',
+  SERVICE_UNAVAILABLE: 'SERVICE_UNAVAILABLE',
+
+  /**
+   * Google answered but refused the call: billing not enabled on the Cloud
+   * project, the API not activated, or the key restricted. It is a
+   * configuration problem on our side, never the caller's.
+   */
+  MAPS_PROVIDER_DENIED: 'MAPS_PROVIDER_DENIED',
+  MAPS_PROVIDER_QUOTA_EXCEEDED: 'MAPS_PROVIDER_QUOTA_EXCEEDED',
+  MAPS_PROVIDER_UNAVAILABLE: 'MAPS_PROVIDER_UNAVAILABLE',
+  ROUTE_PROVIDER_UNAVAILABLE: 'ROUTE_PROVIDER_UNAVAILABLE',
+  /** Google answered fine, but there is no drivable route between the stops. */
+  ROUTE_NOT_FOUND: 'ROUTE_NOT_FOUND',
 } as const;
 
 export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];

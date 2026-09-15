@@ -15,14 +15,22 @@ import { Roles } from '@/common/decorators/roles.decorator';
 import { CatalogQueryDto } from './dto/catalog-query.dto';
 import { CatalogsService } from './catalogs.service';
 import { CreateCatalogDto } from './dto/create-catalog.dto';
+import { ResolveTerritoryDto } from './dto/resolve-territory.dto';
 import { UpdateCatalogDto } from './dto/update-catalog.dto';
+import {
+  TerritoryMatchService,
+  type TerritoryResolution,
+} from './territory-match.service';
 
 @ApiTags('catalogs')
 @ApiBearerAuth()
 @Roles(ROLES.ADMIN, ROLES.OPERATOR)
 @Controller('catalogs')
 export class CatalogsController {
-  constructor(private readonly service: CatalogsService) {}
+  constructor(
+    private readonly service: CatalogsService,
+    private readonly territories: TerritoryMatchService,
+  ) {}
 
   @ApiOperation({ summary: 'List catalogs' })
   @Get()
@@ -44,6 +52,19 @@ export class CatalogsController {
     @Param('provinceId', ParseUUIDPipe) provinceId: string,
   ): Promise<Municipality[]> {
     return this.service.listMunicipalities(provinceId);
+  }
+
+  @ApiOperation({
+    summary: 'Resolve Google place names into province and municipality ids',
+    description:
+      'In-memory only, never calls Google. Feed it the address components of a geocoding result to fill the Provincia/Municipio selects. `confidence: none` means the caller should fall back to matching the formatted address.',
+  })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
+  @Post('territories/resolve')
+  resolveTerritory(
+    @Body() dto: ResolveTerritoryDto,
+  ): Promise<TerritoryResolution> {
+    return this.territories.resolve(dto);
   }
 
   @ApiOperation({ summary: 'Create catalog item' })

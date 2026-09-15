@@ -2,7 +2,10 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
 import { googleMapsConfig } from './google-maps.config';
-import { GoogleRoutesError } from './errors/google-routes.error';
+import {
+  GoogleRoutesError,
+  type GoogleRoutesFailure,
+} from './errors/google-routes.error';
 import type {
   ComputedRoute,
   ComputeRouteInput,
@@ -37,8 +40,13 @@ export class GoogleRoutesService {
     private readonly config: ConfigType<typeof googleMapsConfig>,
   ) {}
 
+  /**
+   * Mirrors GoogleMapsPlatformService: the offline stub is served only when
+   * there is no key at all or the mock flag is explicitly on. A key that is
+   * present but rejected must raise, not quietly return a fake straight line.
+   */
   get isConfigured(): boolean {
-    return this.config.serverApiKey.length > 0;
+    return !this.config.useMocks && this.config.serverApiKey.length > 0;
   }
 
   async computeRoute(input: ComputeRouteInput): Promise<ComputedRoute> {
@@ -47,18 +55,21 @@ export class GoogleRoutesService {
     }
 
     const url = `${this.config.routesBaseUrl}/directions/v2:computeRoutes`;
-    const body = {
-      origin: this.toWaypoint(input.origin),
-      destination: this.toWaypoint(input.destination),
-      intermediates: (input.intermediates ?? []).map((point) =>
-        this.toWaypoint(point),
-      ),
-      travelMode: input.travelMode ?? 'DRIVE',
-      routingPreference: input.routingPreference ?? 'TRAFFIC_AWARE',
-      polylineEncoding: 'ENCODED_POLYLINE',
-    };
 
     try {
+      // Built inside the try on purpose: a malformed input would otherwise
+      // throw a raw TypeError past the catch-all filter as a bare 500.
+      const body = {
+        origin: this.toWaypoint(input.origin),
+        destination: this.toWaypoint(input.destination),
+        intermediates: (input.intermediates ?? []).map((point) =>
+          this.toWaypoint(point),
+        ),
+        travelMode: input.travelMode ?? 'DRIVE',
+        routingPreference: input.routingPreference ?? 'TRAFFIC_AWARE',
+        polylineEncoding: 'ENCODED_POLYLINE',
+      };
+
       const response = await axios.post(url, body, {
         timeout: this.config.routesTimeoutMs,
         headers: {
@@ -97,7 +108,7 @@ export class GoogleRoutesService {
       | undefined;
 
     if (!route || !route.polyline?.encodedPolyline) {
-      throw new GoogleRoutesError('Google Routes returned no usable route');
+      throw GoogleRoutesError.noRoute();
     }
 
     const distanceMeters = route.distanceMeters ?? 0;
@@ -142,16 +153,26 @@ export class GoogleRoutesService {
   }
 
   private handleProviderError(error: unknown): never {
+    // A GoogleRoutesError raised inside the try (e.g. `noRoute`) must keep its
+    // own reason instead of being flattened into a generic provider outage.
+    if (error instanceof GoogleRoutesError) {
+      throw error;
+    }
+
     if (error instanceof AxiosError) {
+      const status = error.response?.status;
       // Log full detail server-side; never leak the API key or raw provider
-      // payload to the client.
+      // payload to the client. `error.message` from Google carries the billing
+      // hint ("You must enable Billing on the Google Cloud Project...").
       this.logger.error(
-        `Google Routes request failed: status=${error.response?.status ?? 'n/a'} code=${error.code ?? 'n/a'}`,
+        `Google Routes request failed: status=${status ?? 'n/a'} code=${error.code ?? 'n/a'} message=${providerMessage(error.response?.data) ?? 'n/a'}`,
       );
+
       throw new GoogleRoutesError(
         'Route provider is temporarily unavailable',
-        error.response?.status,
+        status,
         error.response?.data,
+        classify(error),
       );
     }
 
@@ -251,4 +272,37 @@ export class GoogleRoutesService {
     output += String.fromCharCode(v + 63);
     return output;
   }
+}
+
+/**
+ * Billing disabled, Routes API not enabled and a restricted key all surface the
+ * same way: HTTP 403 with `PERMISSION_DENIED`. They are configuration problems,
+ * not transient outages, so they get their own reason.
+ */
+function classify(error: AxiosError): GoogleRoutesFailure {
+  if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+    return 'provider-timeout';
+  }
+
+  const status = error.response?.status;
+  if (status === 401 || status === 403) {
+    return 'provider-denied';
+  }
+
+  return 'provider-error';
+}
+
+/** Google REST errors nest the human-readable reason under `error.message`. */
+function providerMessage(data: unknown): string | undefined {
+  if (typeof data !== 'object' || data === null) {
+    return undefined;
+  }
+
+  const error = (data as { error?: unknown }).error;
+  if (typeof error !== 'object' || error === null) {
+    return undefined;
+  }
+
+  const message = (error as { message?: unknown }).message;
+  return typeof message === 'string' ? message : undefined;
 }

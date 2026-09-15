@@ -6,6 +6,7 @@ import {
   Post,
   Get,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ROLES } from '@generated/prisma/enums';
 import { Roles } from '@/common/decorators/roles.decorator';
@@ -14,6 +15,10 @@ import { GoogleRoutesService } from '@/integrations/google-maps/google-routes.se
 import { EstimateRouteDto } from './dto/estimate-route.dto';
 import { OrderRouteService } from './order-route.service';
 import { RoutesService } from './routes.service';
+
+/** Each of these reaches the billed Routes API; see GoogleMapsController. */
+const perMinute = (limit: number) =>
+  Throttle({ default: { limit, ttl: 60_000 } });
 
 @ApiTags('routes')
 @ApiBearerAuth()
@@ -26,9 +31,12 @@ export class RoutesController {
   ) {}
 
   @ApiOperation({
-    summary: 'Estimate route with internal/mock provider (pricing)',
+    summary: 'Estimate a route: road distance, duration and drawable polyline',
+    description:
+      'Uses the Google Routes API and falls back to a straight-line estimate when the provider is unreachable, so an order can always be placed. `distanceSource` reports which figure fed the price.',
   })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
+  @perMinute(40)
   @Post('estimate')
   estimate(@Body() dto: EstimateRouteDto) {
     return this.service.estimate(dto);
@@ -38,6 +46,7 @@ export class RoutesController {
     summary: 'Compute a driving route (Google Routes API, server-side key)',
   })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @perMinute(30)
   @Post('compute')
   compute(@Body() dto: ComputeRouteDto) {
     return this.googleRoutes.computeRoute({
@@ -51,6 +60,7 @@ export class RoutesController {
     summary: 'Get the cached driving route for an order (polyline + ETA)',
   })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
+  @perMinute(60)
   @Get('orders/:orderId')
   getOrderRoute(@Param('orderId', ParseUUIDPipe) orderId: string) {
     return this.orderRoutes.getForOrder(orderId);

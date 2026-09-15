@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigType } from '@nestjs/config';
 import { APP_FILTER, APP_GUARD, APP_INTERCEPTOR } from '@nestjs/core';
-import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import type { IncomingMessage, ServerResponse } from 'http';
 import { LoggerModule } from 'nestjs-pino';
 import { AllExceptionsFilter } from './common/filters/all-exceptions.filter';
@@ -12,8 +12,10 @@ import { DriverVerificationGuard } from './common/guards/driver-verification.gua
 import { JwtAuthGuard } from './common/guards/jwt-auth.guard';
 import { PermissionsGuard } from './common/guards/permissions.guard';
 import { RolesGuard } from './common/guards/roles.guard';
+import { UserThrottlerGuard } from './common/guards/user-throttler.guard';
 import { ResponseInterceptor } from './common/interceptors/response.interceptor';
 import { REQUEST_ID_HEADER } from './common/constants/request.constant';
+import { GoogleRoutesExceptionFilter } from './integrations/google-maps/filters/google-routes-exception.filter';
 import { appConfig, configLoaders, validateEnv } from './config';
 import { DatabaseModule } from './database/database.module';
 import { HealthController } from './health.controller';
@@ -88,10 +90,15 @@ import { TransportModule } from './modules/transport/transport.module';
   ],
   controllers: [HealthController],
   providers: [
-    // Guard order matters: rate limit → authentication → account status →
+    // Guard order matters: authentication → rate limit → account status →
     // authorization (roles, then fine-grained permissions).
-    { provide: APP_GUARD, useClass: ThrottlerGuard },
+    //
+    // Rate limiting runs *after* authentication so it can bucket per user
+    // instead of per IP (see UserThrottlerGuard). Nothing expensive happens
+    // before it: an invalid token is rejected by the signature check, and the
+    // strategy only touches the database once the signature is already valid.
     { provide: APP_GUARD, useClass: JwtAuthGuard },
+    { provide: APP_GUARD, useClass: UserThrottlerGuard },
     { provide: APP_GUARD, useClass: AccountStatusGuard },
     { provide: APP_GUARD, useClass: DriverVerificationGuard },
     { provide: APP_GUARD, useClass: RolesGuard },
@@ -99,6 +106,7 @@ import { TransportModule } from './modules/transport/transport.module';
     // Catch-all first; the Prisma filter (more specific) wins when it matches.
     { provide: APP_FILTER, useClass: AllExceptionsFilter },
     { provide: APP_FILTER, useClass: PrismaExceptionFilter },
+    { provide: APP_FILTER, useClass: GoogleRoutesExceptionFilter },
     { provide: APP_INTERCEPTOR, useClass: ResponseInterceptor },
   ],
 })

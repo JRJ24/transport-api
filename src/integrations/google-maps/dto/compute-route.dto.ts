@@ -3,7 +3,9 @@ import { Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   IsArray,
+  IsDefined,
   IsNumber,
+  IsObject,
   IsOptional,
   Max,
   Min,
@@ -27,12 +29,19 @@ export class RoutePointDto {
 }
 
 export class ComputeRouteDto {
+  // `@ValidateNested` alone is a no-op on a missing or non-object value, so
+  // without these two an empty body passed validation and then crashed with a
+  // TypeError deeper in the service.
   @ApiProperty({ type: RoutePointDto })
+  @IsDefined()
+  @IsObject()
   @ValidateNested()
   @Type(() => RoutePointDto)
   origin!: RoutePointDto;
 
   @ApiProperty({ type: RoutePointDto })
+  @IsDefined()
+  @IsObject()
   @ValidateNested()
   @Type(() => RoutePointDto)
   destination!: RoutePointDto;

@@ -1,6 +1,7 @@
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigType } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
@@ -8,9 +9,16 @@ import { AppModule } from './app.module';
 import { appConfig } from './config';
 
 async function bootstrap(): Promise<void> {
-  const app = await NestFactory.create(AppModule, { bufferLogs: true });
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    bufferLogs: true,
+  });
 
   app.useLogger(app.get(Logger));
+
+  // One hop: the nginx in front sets X-Forwarded-For. Without this every
+  // request presents the proxy's address, so rate limiting buckets the whole
+  // tenant together and the access logs are useless.
+  app.set('trust proxy', 1);
 
   const config = app.get<ConfigType<typeof appConfig>>(appConfig.KEY);
 

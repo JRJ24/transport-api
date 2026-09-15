@@ -1,12 +1,18 @@
 import {
   BadGatewayException,
+  BadRequestException,
+  GatewayTimeoutException,
+  HttpException,
   Inject,
   Injectable,
   Logger,
+  ServiceUnavailableException,
+  type OnApplicationBootstrap,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import axios, { AxiosError } from 'axios';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import { TtlCache, roundCoord } from '@/common/utils/ttl-cache.util';
 import type { AddressValidationDto } from './dto/address-validation.dto';
 import type { GeocodeDto } from './dto/geocode.dto';
 import type { LatLngDto } from './dto/maps-common.dto';
@@ -40,8 +46,35 @@ export interface PlaceDetailsResult {
   location: LatLngDto | null;
   types: string[];
   googleMapsUri?: string;
-  addressComponents?: unknown[];
+  components: AddressComponents;
   provider: MapsProvider;
+}
+
+export interface RawAddressComponent {
+  longName: string;
+  shortName: string;
+  types: string[];
+}
+
+/**
+ * The address broken into the pieces the Dominican order form actually needs.
+ *
+ * Every field is nullable: Google omits components freely, especially in
+ * informal addresses. `formattedAddress` stays on the result as the documented
+ * fallback for the clients that still match provinces by substring.
+ */
+export interface AddressComponents {
+  streetNumber: string | null;
+  route: string | null;
+  /** `route` and `streetNumber` composed in Dominican order: "Av. Sarasota #42". */
+  street: string | null;
+  sector: string | null;
+  municipality: string | null;
+  province: string | null;
+  postalCode: string | null;
+  /** ISO code, expected to be 'DO'. */
+  countryCode: string | null;
+  raw: RawAddressComponent[];
 }
 
 export interface GeocodeResult {
@@ -49,6 +82,7 @@ export interface GeocodeResult {
   location: LatLngDto;
   placeId?: string;
   types: string[];
+  components: AddressComponents;
   provider: MapsProvider;
 }
 
@@ -65,6 +99,31 @@ export interface SnappedPoint {
   placeId: string | null;
 }
 
+export type ProbedApi =
+  'geocoding' | 'places' | 'routes' | 'address-validation' | 'roads';
+
+export interface MapsApiProbe {
+  api: ProbedApi;
+  ok: boolean;
+  httpStatus: number | null;
+  /** Google's own status string: REQUEST_DENIED, PERMISSION_DENIED, ... */
+  providerStatus: string | null;
+  /** Google's `error_message`. Admin-only: it names the Cloud project. */
+  message: string | null;
+  latencyMs: number;
+}
+
+export interface MapsDiagnostics {
+  keyConfigured: boolean;
+  keySource: 'GOOGLE_MAPS_SERVER_API_KEY' | 'GOOGLE_MAPS_API_KEY' | 'none';
+  /** Last 4 characters only: enough to tell two keys apart, useless if leaked. */
+  keySuffix: string | null;
+  useMocks: boolean;
+  healthy: boolean;
+  checkedAt: string;
+  apis: MapsApiProbe[];
+}
+
 export interface RouteOptimizationResult {
   routes: unknown[];
   metrics: Record<string, unknown> | null;
@@ -72,14 +131,96 @@ export interface RouteOptimizationResult {
   provider: MapsProvider;
 }
 
+/** Short, so the probe cannot stall an admin request behind a dead provider. */
+const PROBE_TIMEOUT_MS = 3_000;
+const PROBE_ORIGIN = { latitude: 18.4861, longitude: -69.9312 };
+
+/** The stubs have no real address to break apart. */
+function emptyAddressComponents(): AddressComponents {
+  return {
+    streetNumber: null,
+    route: null,
+    street: null,
+    sector: null,
+    municipality: null,
+    province: null,
+    postalCode: null,
+    countryCode: 'DO',
+    raw: [],
+  };
+}
+const PROBE_DESTINATION = { latitude: 18.4795, longitude: -69.9124 };
+
+/**
+ * Geocoding results barely move, and both directions are billed per call. A
+ * pin nudged a few metres or an address retyped after a validation error
+ * should not cost twice.
+ */
+const REVERSE_GEOCODE_TTL_MS = 10 * 60 * 1000;
+const GEOCODE_TTL_MS = 30 * 60 * 1000;
+const GEOCODE_CACHE_ENTRIES = 1_000;
+
 @Injectable()
-export class GoogleMapsPlatformService {
+export class GoogleMapsPlatformService implements OnApplicationBootstrap {
   private readonly logger = new Logger(GoogleMapsPlatformService.name);
+  private static readonly probeCache = new TtlCache<MapsDiagnostics>(60_000, 1);
+  private readonly geocodeCache = new TtlCache<GeocodeResult[]>(
+    GEOCODE_TTL_MS,
+    GEOCODE_CACHE_ENTRIES,
+  );
+  private readonly reverseGeocodeCache = new TtlCache<GeocodeResult[]>(
+    REVERSE_GEOCODE_TTL_MS,
+    GEOCODE_CACHE_ENTRIES,
+  );
 
   constructor(
     @Inject(googleMapsConfig.KEY)
     private readonly config: ConfigType<typeof googleMapsConfig>,
   ) {}
+
+  /**
+   * Say out loud, once, which Google APIs actually answer. A dead key used to
+   * be discoverable only by a customer failing to place an order.
+   *
+   * Never throws: a maps outage must not stop the API from booting.
+   */
+  async onApplicationBootstrap(): Promise<void> {
+    if (process.env.NODE_ENV === 'test') {
+      return;
+    }
+
+    if (this.config.useMocks) {
+      this.logger.warn(
+        'GOOGLE_MAPS_USE_MOCKS=true: serving offline stubs, no Google calls will be made.',
+      );
+      return;
+    }
+
+    if (this.config.serverApiKey.length === 0) {
+      this.logger.warn(
+        'No Google Maps server key configured: serving offline stubs. Set GOOGLE_MAPS_SERVER_API_KEY.',
+      );
+      return;
+    }
+
+    try {
+      const diagnostics = await this.probe();
+
+      for (const api of diagnostics.apis) {
+        if (api.ok) {
+          this.logger.log(`Google ${api.api}: ok (${api.latencyMs}ms)`);
+        } else {
+          this.logger.warn(
+            `Google ${api.api}: FAILED status=${api.providerStatus ?? api.httpStatus ?? 'n/a'} - ${api.message ?? 'no detail'}`,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Could not probe the Google Maps APIs at startup: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
+  }
 
   autocompletePlaces(dto: PlaceAutocompleteDto): Promise<{
     suggestions: PlaceSuggestion[];
@@ -178,17 +319,32 @@ export class GoogleMapsPlatformService {
       return Promise.resolve([this.mockGeocode(dto.address)]);
     }
 
+    const address = dto.address.trim();
+    const cacheKey = address.toLowerCase().replace(/\s+/g, ' ');
+    const cached = this.geocodeCache.get(cacheKey);
+
+    if (cached) {
+      return Promise.resolve(cached);
+    }
+
     return axios
       .get<Record<string, unknown>>(this.config.geocodingBaseUrl, {
         timeout: this.config.mapsTimeoutMs,
         params: {
-          address: dto.address.trim(),
+          address,
           components: 'country:DO',
           language: 'es',
           key: this.config.serverApiKey,
         },
       })
-      .then((response) => this.mapGeocodeResults(response.data))
+      .then((response) => {
+        // Only successes are cached; a thrown provider error must not be
+        // pinned for half an hour after the configuration is fixed.
+        // ZERO_RESULTS is a success: the address genuinely does not exist.
+        const results = this.mapGeocodeResponse(response.data);
+        this.geocodeCache.set(cacheKey, results);
+        return results;
+      })
       .catch((error: unknown) =>
         this.handleProviderError('Geocoding API', error),
       );
@@ -201,6 +357,13 @@ export class GoogleMapsPlatformService {
       ]);
     }
 
+    const cacheKey = `${roundCoord(dto.latitude)},${roundCoord(dto.longitude)}`;
+    const cached = this.reverseGeocodeCache.get(cacheKey);
+
+    if (cached) {
+      return Promise.resolve(cached);
+    }
+
     return axios
       .get<Record<string, unknown>>(this.config.geocodingBaseUrl, {
         timeout: this.config.mapsTimeoutMs,
@@ -210,7 +373,11 @@ export class GoogleMapsPlatformService {
           key: this.config.serverApiKey,
         },
       })
-      .then((response) => this.mapGeocodeResults(response.data))
+      .then((response) => {
+        const results = this.mapGeocodeResponse(response.data);
+        this.reverseGeocodeCache.set(cacheKey, results);
+        return results;
+      })
       .catch((error: unknown) =>
         this.handleProviderError('Geocoding API', error),
       );
@@ -300,8 +467,182 @@ export class GoogleMapsPlatformService {
       );
   }
 
+  /**
+   * One cheap call per Google API, so "is billing actually on?" is answerable
+   * from inside the product instead of only from the browser console.
+   *
+   * Cached for a minute: this endpoint costs money, and a refresh-happy admin
+   * should not be able to turn it into a billing amplifier.
+   */
+  async probe(): Promise<MapsDiagnostics> {
+    const cached = GoogleMapsPlatformService.probeCache.get('probe');
+    if (cached) {
+      return cached;
+    }
+
+    const key = this.config.serverApiKey;
+    const apis = await Promise.all([
+      this.probeGeocoding(),
+      this.probeRest('places', () =>
+        axios.post(
+          `${this.config.placesBaseUrl}/places:autocomplete`,
+          { input: 'Duarte', includedRegionCodes: ['do'], languageCode: 'es' },
+          {
+            timeout: PROBE_TIMEOUT_MS,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Goog-Api-Key': key,
+              'X-Goog-FieldMask': 'suggestions.placePrediction.placeId',
+            },
+          },
+        ),
+      ),
+      this.probeRest('routes', () =>
+        axios.post(
+          `${this.config.routesBaseUrl}/directions/v2:computeRoutes`,
+          {
+            origin: { location: { latLng: PROBE_ORIGIN } },
+            destination: { location: { latLng: PROBE_DESTINATION } },
+            travelMode: 'DRIVE',
+          },
+          {
+            timeout: PROBE_TIMEOUT_MS,
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Goog-Api-Key': key,
+              'X-Goog-FieldMask': 'routes.distanceMeters',
+            },
+          },
+        ),
+      ),
+      this.probeRest('address-validation', () =>
+        axios.post(
+          `${this.config.addressValidationBaseUrl}?key=${key}`,
+          {
+            address: {
+              regionCode: 'DO',
+              addressLines: ['Av. Winston Churchill 1'],
+            },
+          },
+          { timeout: PROBE_TIMEOUT_MS },
+        ),
+      ),
+      this.probeRest('roads', () =>
+        axios.get(`${this.config.roadsBaseUrl}/snapToRoads`, {
+          timeout: PROBE_TIMEOUT_MS,
+          params: {
+            path: `${PROBE_ORIGIN.latitude},${PROBE_ORIGIN.longitude}|${PROBE_DESTINATION.latitude},${PROBE_DESTINATION.longitude}`,
+            key,
+          },
+        }),
+      ),
+    ]);
+
+    const diagnostics: MapsDiagnostics = {
+      keyConfigured: key.length > 0,
+      keySource: process.env.GOOGLE_MAPS_SERVER_API_KEY
+        ? 'GOOGLE_MAPS_SERVER_API_KEY'
+        : process.env.GOOGLE_MAPS_API_KEY
+          ? 'GOOGLE_MAPS_API_KEY'
+          : 'none',
+      keySuffix: key.length >= 4 ? key.slice(-4) : null,
+      useMocks: this.config.useMocks,
+      healthy: apis.every((entry) => entry.ok),
+      checkedAt: new Date().toISOString(),
+      apis,
+    };
+
+    GoogleMapsPlatformService.probeCache.set('probe', diagnostics);
+    return diagnostics;
+  }
+
+  /**
+   * Geocoding is the odd one out: it answers 200 with the refusal in the body,
+   * so a probe that only looked at the HTTP status would report it healthy.
+   */
+  private async probeGeocoding(): Promise<MapsApiProbe> {
+    const startedAt = Date.now();
+
+    try {
+      const response = await axios.get<Record<string, unknown>>(
+        this.config.geocodingBaseUrl,
+        {
+          timeout: PROBE_TIMEOUT_MS,
+          params: {
+            latlng: `${PROBE_ORIGIN.latitude},${PROBE_ORIGIN.longitude}`,
+            language: 'es',
+            key: this.config.serverApiKey,
+          },
+        },
+      );
+
+      const status = this.stringValue(response.data.status) ?? 'UNKNOWN_ERROR';
+
+      return {
+        api: 'geocoding',
+        ok: status === 'OK' || status === 'ZERO_RESULTS',
+        httpStatus: response.status,
+        providerStatus: status,
+        message: this.stringValue(response.data.error_message) ?? null,
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      return this.probeFailure('geocoding', error, startedAt);
+    }
+  }
+
+  private async probeRest(
+    api: ProbedApi,
+    call: () => Promise<{ status: number }>,
+  ): Promise<MapsApiProbe> {
+    const startedAt = Date.now();
+
+    try {
+      const response = await call();
+
+      return {
+        api,
+        ok: true,
+        httpStatus: response.status,
+        providerStatus: null,
+        message: null,
+        latencyMs: Date.now() - startedAt,
+      };
+    } catch (error) {
+      return this.probeFailure(api, error, startedAt);
+    }
+  }
+
+  private probeFailure(
+    api: ProbedApi,
+    error: unknown,
+    startedAt: number,
+  ): MapsApiProbe {
+    const axiosError = error instanceof AxiosError ? error : null;
+    const body = this.asRecord(axiosError?.response?.data).error;
+
+    return {
+      api,
+      ok: false,
+      httpStatus: axiosError?.response?.status ?? null,
+      providerStatus:
+        this.stringValue(this.asRecord(body).status) ??
+        axiosError?.code ??
+        null,
+      message:
+        this.providerErrorMessage(axiosError?.response?.data) ??
+        (error instanceof Error ? error.message : null),
+      latencyMs: Date.now() - startedAt,
+    };
+  }
+
+  /**
+   * Real calls happen only with a key AND without the mock opt-in. A key that
+   * is present but rejected by Google therefore raises a typed error instead of
+   * quietly falling back to fake Santo Domingo coordinates.
+   */
   private get isConfigured(): boolean {
-    return this.config.serverApiKey.length > 0;
+    return !this.config.useMocks && this.config.serverApiKey.length > 0;
   }
 
   private mapPlaceSuggestions(
@@ -355,10 +696,143 @@ export class GoogleMapsPlatformService {
       ...(this.stringValue(data.googleMapsUri) && {
         googleMapsUri: this.stringValue(data.googleMapsUri),
       }),
-      ...(Array.isArray(data.addressComponents) && {
-        addressComponents: data.addressComponents,
-      }),
+      components: this.parseAddressComponents(data.addressComponents),
       provider: 'google-places',
+    };
+  }
+
+  /**
+   * The legacy Geocoding JSON API answers **HTTP 200 even when it refuses the
+   * call**, putting the real outcome in `status` and `error_message`. Reading
+   * only `results` therefore turned "billing is disabled" into a silent empty
+   * array, which is exactly why the order form stopped filling itself in.
+   */
+  private mapGeocodeResponse(data: Record<string, unknown>): GeocodeResult[] {
+    const status = this.stringValue(data.status) ?? 'UNKNOWN_ERROR';
+    const providerMessage = this.stringValue(data.error_message);
+
+    if (status === 'OK') {
+      return this.mapGeocodeResults(data);
+    }
+
+    if (status === 'ZERO_RESULTS') {
+      return [];
+    }
+
+    if (status === 'INVALID_REQUEST') {
+      this.logger.warn(
+        `Geocoding API rejected the request: ${providerMessage ?? 'no detail'}`,
+      );
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'La direccion enviada no es valida',
+      });
+    }
+
+    // `error_message` names the Cloud project and the billing console URL, so
+    // it is logged in full and never serialized to the client.
+    this.logger.error(
+      `Geocoding API failed: status=${status} message=${providerMessage ?? 'n/a'}`,
+    );
+
+    if (status === 'REQUEST_DENIED') {
+      throw this.providerDenied('Geocoding API');
+    }
+
+    if (status === 'OVER_QUERY_LIMIT' || status === 'OVER_DAILY_LIMIT') {
+      throw new ServiceUnavailableException({
+        code: ERROR_CODES.MAPS_PROVIDER_QUOTA_EXCEEDED,
+        message: 'Se agoto la cuota del servicio de mapas',
+      });
+    }
+
+    throw new ServiceUnavailableException({
+      code: ERROR_CODES.MAPS_PROVIDER_UNAVAILABLE,
+      message: 'El servicio de mapas no esta disponible temporalmente',
+    });
+  }
+
+  /**
+   * Billing not enabled, the API not activated and a key restricted to other
+   * APIs all arrive as the same refusal. It is our configuration that is wrong,
+   * so it is a 503 and not the caller's fault.
+   */
+  private providerDenied(service: string): ServiceUnavailableException {
+    return new ServiceUnavailableException({
+      code: ERROR_CODES.MAPS_PROVIDER_DENIED,
+      message: `El servicio de mapas no esta disponible (configuracion del proveedor: ${service})`,
+    });
+  }
+
+  /**
+   * Normalizes the address components of either Google dialect.
+   *
+   * The legacy Geocoding API returns `address_components` with
+   * `long_name`/`short_name`; Places (New) returns `addressComponents` with
+   * `longText`/`shortText`. One parser for both means the clients see a single
+   * shape whether the customer typed an address or picked a suggestion.
+   */
+  private parseAddressComponents(value: unknown): AddressComponents {
+    const raw: RawAddressComponent[] = (Array.isArray(value) ? value : [])
+      .map((item) => {
+        const record = this.asRecord(item);
+        const longName =
+          this.stringValue(record.long_name) ??
+          this.stringValue(record.longText);
+        const shortName =
+          this.stringValue(record.short_name) ??
+          this.stringValue(record.shortText) ??
+          longName;
+
+        return longName
+          ? {
+              longName,
+              shortName: shortName ?? longName,
+              types: this.stringArray(record.types),
+            }
+          : null;
+      })
+      .filter((item): item is RawAddressComponent => item !== null);
+
+    const pick = (
+      types: string[],
+      field: 'longName' | 'shortName' = 'longName',
+    ): string | null => {
+      for (const type of types) {
+        const match = raw.find((component) => component.types.includes(type));
+        if (match) {
+          return match[field];
+        }
+      }
+      return null;
+    };
+
+    const route = pick(['route']);
+    const streetNumber = pick(['street_number']);
+
+    return {
+      streetNumber,
+      route,
+      street: route
+        ? streetNumber
+          ? `${route} #${streetNumber}`
+          : route
+        : null,
+      sector: pick(['sublocality_level_1', 'sublocality', 'neighborhood']),
+      // `locality` first is critical in the DR: for a Santo Domingo Este
+      // address Google returns locality "Santo Domingo Este" (the municipio)
+      // and administrative_area_level_1 "Santo Domingo" (the province). Reading
+      // admin_area_2 first would put the province name in the municipio slot.
+      municipality: pick([
+        'locality',
+        'administrative_area_level_2',
+        'administrative_area_level_3',
+        'administrative_area_level_4',
+      ]),
+      province: pick(['administrative_area_level_1']),
+      postalCode: pick(['postal_code']),
+      countryCode: pick(['country'], 'shortName'),
+      raw,
     };
   }
 
@@ -385,6 +859,7 @@ export class GoogleMapsPlatformService {
             placeId: this.stringValue(result.place_id),
           }),
           types: this.stringArray(result.types),
+          components: this.parseAddressComponents(result.address_components),
           provider: 'google-geocoding' as const,
         };
       })
@@ -470,6 +945,7 @@ export class GoogleMapsPlatformService {
       formattedAddress: value,
       location: { latitude: 18.4861, longitude: -69.9312 },
       types: ['street_address'],
+      components: emptyAddressComponents(),
       provider: 'internal-mock',
     };
   }
@@ -480,6 +956,7 @@ export class GoogleMapsPlatformService {
       location: location ?? { latitude: 18.4861, longitude: -69.9312 },
       placeId: `mock:${encodeURIComponent(address)}`,
       types: ['street_address'],
+      components: emptyAddressComponents(),
       provider: 'internal-mock',
     };
   }
@@ -546,20 +1023,66 @@ export class GoogleMapsPlatformService {
   }
 
   private handleProviderError(service: string, error: unknown): never {
-    if (error instanceof AxiosError) {
-      this.logger.error(
-        `${service} request failed: status=${error.response?.status ?? 'n/a'} code=${error.code ?? 'n/a'}`,
-      );
-    } else {
+    // `mapGeocodeResponse` throws from inside the `.then()`, so its typed
+    // errors land in the same `.catch()`. Re-classifying them here would
+    // downgrade a precise MAPS_PROVIDER_DENIED into a generic outage, and turn
+    // a 400 into a 503.
+    if (error instanceof HttpException) {
+      throw error;
+    }
+
+    if (!(error instanceof AxiosError)) {
       this.logger.error(
         `${service} request failed: ${error instanceof Error ? error.message : 'unknown'}`,
       );
+      throw new ServiceUnavailableException({
+        code: ERROR_CODES.MAPS_PROVIDER_UNAVAILABLE,
+        message: 'El servicio de mapas no esta disponible temporalmente',
+      });
     }
 
-    throw new BadGatewayException({
-      code: ERROR_CODES.INTERNAL_ERROR,
-      message: `${service} is temporarily unavailable`,
+    const status = error.response?.status;
+    const detail = this.providerErrorMessage(error.response?.data);
+    this.logger.error(
+      `${service} request failed: status=${status ?? 'n/a'} code=${error.code ?? 'n/a'} message=${detail ?? 'n/a'}`,
+    );
+
+    if (error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') {
+      throw new GatewayTimeoutException({
+        code: ERROR_CODES.UPSTREAM_TIMEOUT,
+        message: 'El servicio de mapas tardo demasiado en responder',
+      });
+    }
+
+    if (status === 401 || status === 403) {
+      throw this.providerDenied(service);
+    }
+
+    if (status === 429) {
+      throw new ServiceUnavailableException({
+        code: ERROR_CODES.MAPS_PROVIDER_QUOTA_EXCEEDED,
+        message: 'Se agoto la cuota del servicio de mapas',
+      });
+    }
+
+    // A 4xx here means our own payload is wrong, which is a bug on our side,
+    // not a provider outage.
+    if (status === 400 || status === 404) {
+      throw new BadGatewayException({
+        code: ERROR_CODES.UPSTREAM_ERROR,
+        message: `${service} rechazo la peticion`,
+      });
+    }
+
+    throw new ServiceUnavailableException({
+      code: ERROR_CODES.MAPS_PROVIDER_UNAVAILABLE,
+      message: 'El servicio de mapas no esta disponible temporalmente',
     });
+  }
+
+  /** Google REST errors nest the human-readable reason under `error.message`. */
+  private providerErrorMessage(data: unknown): string | undefined {
+    return this.stringValue(this.asRecord(this.asRecord(data).error).message);
   }
 
   private toGoogleLatLng(point: LatLngDto): {
