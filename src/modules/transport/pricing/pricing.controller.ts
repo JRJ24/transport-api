@@ -18,11 +18,14 @@ import { CreatePriceQuoteDto } from './dto/create-price-quote.dto';
 import { CreateRateCardDto } from './dto/create-rate-card.dto';
 import { CreateRateRuleDto } from './dto/create-rate-rule.dto';
 import { PreviewManualQuoteDto } from './dto/manual-quote.dto';
+import { QuoteOptionsDto } from './dto/quote-options.dto';
 import { RateCardQueryDto } from './dto/rate-card-query.dto';
 import { UpdateRateCardDto } from './dto/update-rate-card.dto';
+import { Throttle } from '@nestjs/throttler';
 import {
   PricingService,
   type ManualQuoteCalculation,
+  type QuoteOption,
 } from './pricing.service';
 
 @ApiTags('pricing')
@@ -82,7 +85,23 @@ export class PricingController {
     return this.service.previewManualQuote(user, dto);
   }
 
-  @ApiOperation({ summary: 'Create an internal/mock price quote' })
+  @ApiOperation({
+    summary: 'Price every vehicle category for one route and load',
+    description:
+      'Read-only: nothing is persisted. Feeds the category cards, which recompute whenever the route or the load changes. The quote that is actually charged is created once, by POST /pricing/quotes.',
+  })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
+  @Throttle({ default: { limit: 120, ttl: 60_000 } })
+  @Post('quote-options')
+  quoteOptions(@Body() dto: QuoteOptionsDto): Promise<QuoteOption[]> {
+    return this.service.quoteOptions(dto);
+  }
+
+  @ApiOperation({
+    summary: 'Create the price quote the order is charged with',
+    description:
+      'Persists a PriceQuote. Call it once, for the chosen category, when the order is submitted - not on every edit.',
+  })
   @Roles(ROLES.CUSTOMER)
   @Post('quotes')
   createQuote(
