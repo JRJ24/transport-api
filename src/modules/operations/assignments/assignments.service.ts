@@ -22,6 +22,7 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
+import { orderStatusLabel } from '@/modules/support/notifications/templates/notification.templates';
 import type { CreateAssignmentDto } from './dto/create-assignment.dto';
 
 const SAFE_USER_SELECT = {
@@ -59,6 +60,64 @@ export class AssignmentsService {
     private readonly notifications: NotificationDispatcherService,
     private readonly realtime: RealtimeService,
   ) {}
+
+  /**
+   * Notifies the ORDER OWNER that its status changed (best-effort).
+   *
+   * Assignment and acceptance only ever reached operators and the driver, so a
+   * customer had no way of learning that someone finally took the order.
+   */
+  private async notifyCustomerOrderStatus(
+    orderId: string,
+    status: STATUS_ORDERS,
+  ): Promise<void> {
+    try {
+      const order = await this.prisma.transportOrder.findUnique({
+        where: { id: orderId },
+        select: { orderCode: true, customer: { select: { userId: true } } },
+      });
+
+      if (!order?.customer?.userId) {
+        return;
+      }
+
+      await this.notifications.dispatch(
+        order.customer.userId,
+        'ORDER_STATUS_CHANGED',
+        {
+          orderId,
+          orderCode: order.orderCode,
+          status: orderStatusLabel(status),
+        },
+      );
+    } catch (error) {
+      this.logger.error(
+        `Failed to notify customer of order status: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
+  }
+
+  /**
+   * Broadcasts an order-status change and tells the customer about it.
+   *
+   * Realtime is fire-and-forget by design: an unreachable socket must never
+   * roll back an assignment that already committed.
+   */
+  private announceOrderStatus(
+    orderId: string,
+    status: STATUS_ORDERS,
+    previousStatus: STATUS_ORDERS,
+    userId: string,
+  ): void {
+    this.realtime.emitOrderStatusChanged({
+      orderId,
+      status,
+      previousStatus,
+      changedByUserId: userId,
+      changedAt: new Date().toISOString(),
+    });
+    void this.notifyCustomerOrderStatus(orderId, status);
+  }
 
   /** Notifies the assigned driver about a new order (best-effort). */
   private async notifyDriverAssigned(
@@ -211,13 +270,12 @@ export class AssignmentsService {
       assignmentStatus: assignment.assignmentStatus,
       assignedAt: assignment.assignedAt.toISOString(),
     });
-    this.realtime.emitOrderStatusChanged({
-      orderId: dto.orderId,
-      status: STATUS_ORDERS.ASSIGNED,
-      previousStatus: currentOrder?.status,
-      changedByUserId: user.id,
-      changedAt: new Date().toISOString(),
-    });
+    this.announceOrderStatus(
+      dto.orderId,
+      STATUS_ORDERS.ASSIGNED,
+      currentOrder.status,
+      user.id,
+    );
     return assignment;
   }
 
@@ -330,19 +388,18 @@ export class AssignmentsService {
       assignmentStatus: assignment.assignmentStatus,
       assignedAt: assignment.assignedAt.toISOString(),
     });
-    this.realtime.emitOrderStatusChanged({
+    this.announceOrderStatus(
       orderId,
-      status: STATUS_ORDERS.ACCEPTED,
-      previousStatus: STATUS_ORDERS.REQUESTED,
-      changedByUserId: user.id,
-      changedAt: new Date().toISOString(),
-    });
+      STATUS_ORDERS.ACCEPTED,
+      STATUS_ORDERS.REQUESTED,
+      user.id,
+    );
 
     return assignment;
   }
 
-  accept(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
-    return this.prisma.$transaction(async (tx) => {
+  async accept(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
+    const assignment = await this.prisma.$transaction(async (tx) => {
       await this.assertCanMutateAssignment(tx, id, user);
       const assignment = await tx.orderAssignment.update({
         where: { id },
@@ -365,10 +422,19 @@ export class AssignmentsService {
 
       return assignment;
     });
+
+    this.announceOrderStatus(
+      assignment.orderId,
+      STATUS_ORDERS.ACCEPTED,
+      STATUS_ORDERS.ASSIGNED,
+      user.id,
+    );
+
+    return assignment;
   }
 
-  reject(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
-    return this.prisma.$transaction(async (tx) => {
+  async reject(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
+    const assignment = await this.prisma.$transaction(async (tx) => {
       await this.assertCanMutateAssignment(tx, id, user);
       const assignment = await tx.orderAssignment.update({
         where: { id },
@@ -396,6 +462,15 @@ export class AssignmentsService {
 
       return assignment;
     });
+
+    this.announceOrderStatus(
+      assignment.orderId,
+      STATUS_ORDERS.REQUESTED,
+      STATUS_ORDERS.ASSIGNED,
+      user.id,
+    );
+
+    return assignment;
   }
 
   complete(id: string): Promise<OrderAssignment> {

@@ -30,6 +30,7 @@ import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { AssignmentsService } from '@/modules/operations/assignments/assignments.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import type { NotificationEvent } from '@/modules/support/notifications/templates/notification.templates';
+import { orderStatusLabel } from '@/modules/support/notifications/templates/notification.templates';
 import {
   PricingService,
   type ManualQuoteInput,
@@ -857,6 +858,12 @@ export class OrdersService {
         ),
     );
 
+    void this.notifyCustomer(order, dto.status).catch((error: unknown) =>
+      this.logger.error(
+        `Failed to notify customer about order status: ${error instanceof Error ? error.message : 'unknown'}`,
+      ),
+    );
+
     return order;
   }
 
@@ -1077,6 +1084,13 @@ export class OrdersService {
         ),
     );
 
+    void this.notifyCustomer(order, STATUS_ORDERS.CANCELLED).catch(
+      (error: unknown) =>
+        this.logger.error(
+          `Failed to notify customer about cancelled order: ${error instanceof Error ? error.message : 'unknown'}`,
+        ),
+    );
+
     return order;
   }
 
@@ -1285,6 +1299,33 @@ export class OrdersService {
       serviceType: order.serviceType,
       createdByUserId,
       createdAt: order.createdAt.toISOString(),
+    });
+  }
+
+  /**
+   * Notifies the order's own customer (best-effort).
+   *
+   * Every status change reached operators and the driver but never the person
+   * who requested the trip, so the customer had no way of learning that theirs
+   * had been taken, started or delivered.
+   */
+  private async notifyCustomer(
+    order: TransportOrder,
+    status: STATUS_ORDERS,
+  ): Promise<void> {
+    const customer = await this.prisma.customerProfile.findUnique({
+      where: { id: order.customerId },
+      select: { userId: true },
+    });
+
+    if (!customer) {
+      return;
+    }
+
+    await this.notifications.dispatch(customer.userId, 'ORDER_STATUS_CHANGED', {
+      orderId: order.id,
+      orderCode: order.orderCode,
+      status: orderStatusLabel(status),
     });
   }
 

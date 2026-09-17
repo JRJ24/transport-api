@@ -1,4 +1,31 @@
-import { NOTIFICATION_TYPE } from '@generated/prisma/enums';
+import { NOTIFICATION_TYPE, STATUS_ORDERS } from '@generated/prisma/enums';
+
+/**
+ * Human-readable Spanish labels for order statuses.
+ *
+ * Notifications are read by customers and drivers, not by operators reading
+ * enum names: «La orden RD-123 cambio a ACCEPTED» means nothing to them.
+ * Callers pass the label through `ctx.status`.
+ */
+export const ORDER_STATUS_LABELS: Record<STATUS_ORDERS, string> = {
+  [STATUS_ORDERS.DRAFT]: 'borrador',
+  [STATUS_ORDERS.PENDING_QUOTE]: 'pendiente de cotizacion',
+  [STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION]: 'pendiente de tu confirmacion',
+  [STATUS_ORDERS.PENDING_PAYMENT]: 'pendiente de pago',
+  [STATUS_ORDERS.CONFIRMED]: 'confirmada, buscando conductor',
+  [STATUS_ORDERS.ASSIGNING_DRIVER]: 'buscando conductor',
+  [STATUS_ORDERS.REQUESTED]: 'sin aceptar, buscando conductor',
+  [STATUS_ORDERS.ASSIGNED]: 'conductor asignado, por confirmar',
+  [STATUS_ORDERS.ACCEPTED]: 'conductor confirmado',
+  [STATUS_ORDERS.IN_PROGRESS]: 'en camino',
+  [STATUS_ORDERS.DELIVERED]: 'entregada',
+  [STATUS_ORDERS.CANCELLED]: 'cancelada',
+  [STATUS_ORDERS.FAILED]: 'fallida',
+};
+
+export function orderStatusLabel(status: string): string {
+  return ORDER_STATUS_LABELS[status as STATUS_ORDERS] ?? status;
+}
 
 /**
  * Logical, domain-level notification events. The stable `type` is sent inside
