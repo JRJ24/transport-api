@@ -35,3 +35,19 @@ export interface ComputedRoute {
   provider: 'google-routes' | 'internal-mock';
   computedAt: string;
 }
+
+/**
+ * Leg from the driver's live position to the stop they are heading to.
+ *
+ * Kept apart from the order's own route on purpose: the order route barely ever
+ * changes and is cached per order, while this one moves with the driver and is
+ * cached by distance travelled. Every field is nullable because a driver with
+ * no GPS fix yet is the normal case, not an error.
+ */
+export interface OrderApproachRoute {
+  route: ComputedRoute | null;
+  targetStopId: string | null;
+  targetStopType: 'PICKUP' | 'DROPOFF' | 'INTERMEDIATE' | null;
+  origin: LatLng | null;
+  originRecordedAt: string | null;
+}

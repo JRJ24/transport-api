@@ -13,6 +13,7 @@ import { Roles } from '@/common/decorators/roles.decorator';
 import { ComputeRouteDto } from '@/integrations/google-maps/dto/compute-route.dto';
 import { GoogleRoutesService } from '@/integrations/google-maps/google-routes.service';
 import { EstimateRouteDto } from './dto/estimate-route.dto';
+import { OrderApproachService } from './order-approach.service';
 import { OrderRouteService } from './order-route.service';
 import { RoutesService } from './routes.service';
 
@@ -27,6 +28,7 @@ export class RoutesController {
   constructor(
     private readonly service: RoutesService,
     private readonly orderRoutes: OrderRouteService,
+    private readonly orderApproach: OrderApproachService,
     private readonly googleRoutes: GoogleRoutesService,
   ) {}
 
@@ -64,5 +66,18 @@ export class RoutesController {
   @Get('orders/:orderId')
   getOrderRoute(@Param('orderId', ParseUUIDPipe) orderId: string) {
     return this.orderRoutes.getForOrder(orderId);
+  }
+
+  @ApiOperation({
+    summary:
+      "Leg from the driver's last known position to the stop they are heading to",
+    description:
+      'Complements the order route, which only covers pickup to dropoff. The origin comes from the stored driver location, so every viewer shares one cached answer. Recomputed only once the driver has moved more than 200 m, and `route` is null when there is no GPS fix yet.',
+  })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
+  @perMinute(60)
+  @Get('orders/:orderId/approach')
+  getOrderApproach(@Param('orderId', ParseUUIDPipe) orderId: string) {
+    return this.orderApproach.getForOrder(orderId);
   }
 }
