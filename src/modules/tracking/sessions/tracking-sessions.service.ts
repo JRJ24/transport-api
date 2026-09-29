@@ -21,6 +21,7 @@ import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
 import type { CreateSessionDto } from './dto/create-session.dto';
 import type { TrackingLocationDto } from './dto/tracking-location.dto';
+import { haversineMeters } from '@/common/utils/geo.util';
 
 interface DriverContext {
   driverId: string;
@@ -402,14 +403,9 @@ export class TrackingSessionsService {
     lat2: number,
     lon2: number,
   ): number {
-    const R = 6_371_000;
-    const dLat = ((lat2 - lat1) * Math.PI) / 180;
-    const dLon = ((lon2 - lon1) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos((lat1 * Math.PI) / 180) *
-        Math.cos((lat2 * Math.PI) / 180) *
-        Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return haversineMeters(
+      { latitude: lat1, longitude: lon1 },
+      { latitude: lat2, longitude: lon2 },
+    );
   }
 }

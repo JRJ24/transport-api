@@ -15,6 +15,7 @@ import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { hashPassword } from '@/common/utils/hash.util';
 import { PrismaService } from '@/database/prisma.service';
+import { PresenceService } from '../presence/presence.service';
 import type { CreateDriverDto } from './dto/create-driver.dto';
 import type { DriverQueryDto } from './dto/driver-query.dto';
 import type { RegisterDriverDto } from './dto/register-driver.dto';
@@ -34,7 +35,26 @@ const SAFE_USER_SELECT = {
 
 @Injectable()
 export class DriversService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly presence: PresenceService,
+  ) {}
+
+  /**
+   * Keeps H3 presence in step with the profile: a driver who is no longer
+   * available or approved must drop out of candidate search right away, not
+   * when their last GPS ping expires.
+   */
+  private async syncPresence(driver: DriverProfile): Promise<DriverProfile> {
+    this.presence.forgetUser(driver.userId);
+    if (
+      driver.availabilityStatus !== STATUS_DRIVER.AVAILABLE ||
+      driver.verificationStatus !== VERIFICATION_STATUS.APPROVED
+    ) {
+      await this.presence.remove(driver.id);
+    }
+    return driver;
+  }
 
   list(query: DriverQueryDto): Promise<DriverProfile[]> {
     const where: Prisma.DriverProfileWhereInput = {
@@ -263,17 +283,18 @@ export class DriversService {
       }
     }
 
-    return this.prisma.driverProfile.update({
+    const driver = await this.prisma.driverProfile.update({
       where: { id },
       data: { availabilityStatus: dto.availabilityStatus },
     });
+    return this.syncPresence(driver);
   }
 
   async updateVerification(
     id: string,
     dto: UpdateDriverVerificationDto,
   ): Promise<DriverProfile> {
-    return this.prisma.$transaction(async (tx) => {
+    const updated = await this.prisma.$transaction(async (tx) => {
       const driver = await tx.driverProfile.update({
         where: { id },
         data: {
@@ -304,10 +325,11 @@ export class DriversService {
 
       return driver;
     });
+    return this.syncPresence(updated);
   }
 
   async softDelete(id: string, actorUserId: string): Promise<DriverProfile> {
-    return this.prisma.$transaction(async (tx) => {
+    const deleted = await this.prisma.$transaction(async (tx) => {
       const existing = await tx.driverProfile.findUnique({
         where: { id },
         include: { user: { select: SAFE_USER_SELECT } },
@@ -350,6 +372,7 @@ export class DriversService {
 
       return driver;
     });
+    return this.syncPresence(deleted);
   }
 
   private hasVehiclePayload(dto: RegisterDriverDto): boolean {

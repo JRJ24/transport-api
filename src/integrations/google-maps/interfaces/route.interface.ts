@@ -51,3 +51,21 @@ export interface OrderApproachRoute {
   origin: LatLng | null;
   originRecordedAt: string | null;
 }
+
+/**
+ * One origin → destination cell of a route matrix. `status` other than `OK`
+ * means there is no usable estimate: callers must not invent one.
+ */
+export interface RouteMatrixElement {
+  originIndex: number;
+  destinationIndex: number;
+  status: 'OK' | 'ROUTE_NOT_FOUND' | 'ERROR';
+  distanceMeters: number | null;
+  durationSeconds: number | null;
+}
+
+export interface RouteMatrixResult {
+  elements: RouteMatrixElement[];
+  provider: 'google-routes' | 'internal-mock';
+  computedAt: string;
+}

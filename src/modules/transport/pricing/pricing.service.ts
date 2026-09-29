@@ -3,6 +3,7 @@ import {
   ForbiddenException,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type {
   PriceQuote,
@@ -20,6 +21,8 @@ import type { CreateRateCardDto } from './dto/create-rate-card.dto';
 import type { CreateRateRuleDto } from './dto/create-rate-rule.dto';
 import type { RateCardQueryDto } from './dto/rate-card-query.dto';
 import type { UpdateRateCardDto } from './dto/update-rate-card.dto';
+import { DemandService, type DemandSnapshot } from './demand.service';
+import { computeFare } from './fare';
 
 const TAX_RATE = 0.18;
 const QUOTE_TTL_MS = 15 * 60_000;
@@ -58,6 +61,9 @@ export interface QuoteAmounts {
 export interface QuoteOptionsInput {
   distanceKm: number;
   estimatedDurationMin: number;
+  /** Pickup, for the demand multiplier. Without it demand is not applied. */
+  originLatitude?: number;
+  originLongitude?: number;
   weightKg?: number;
   volumeM3?: number;
   quantity?: number;
@@ -74,6 +80,11 @@ export interface QuoteOption {
   maxVolumenM3: number;
   /** Null when the category has no active rate rule. */
   totalAmount: number | null;
+  /** Multiplier charged (1 when demand pricing is off or in shadow). */
+  demandMultiplier: number;
+  demandBand: string | null;
+  /** No driver of this category is available near the pickup right now. */
+  noSupply: boolean | null;
   /** Whether the declared load fits in this category. */
   fits: boolean;
   unavailable?: 'NO_RATE' | 'CAPACITY';
@@ -97,7 +108,28 @@ export interface ManualQuoteCalculation {
 
 @Injectable()
 export class PricingService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly demand?: DemandService,
+  ) {}
+
+  /** Demand per category at the pickup; empty when unknown or disabled. */
+  private async demandFor(
+    input: { originLatitude?: number; originLongitude?: number },
+    vehicleCategoryIds: string[],
+  ): Promise<Map<string, DemandSnapshot>> {
+    if (
+      !this.demand ||
+      input.originLatitude === undefined ||
+      input.originLongitude === undefined
+    ) {
+      return new Map();
+    }
+    return this.demand.forPickup(
+      { latitude: input.originLatitude, longitude: input.originLongitude },
+      vehicleCategoryIds,
+    );
+  }
 
   listRateCards(query: RateCardQueryDto): Promise<RateCard[]> {
     const where: Prisma.RateCardWhereInput = {
@@ -208,7 +240,10 @@ export class PricingService {
       });
     }
 
-    const amounts = priceFor(rule, dto);
+    const demand = (await this.demandFor(dto, [dto.vehicleCategoryId])).get(
+      dto.vehicleCategoryId,
+    );
+    const amounts = priceFor(rule, dto, demand?.appliedMultiplier ?? 1);
 
     return this.prisma.priceQuote.create({
       data: {
@@ -219,6 +254,23 @@ export class PricingService {
         distanceKm: dto.distanceKm,
         estimatedDurationMin: Math.round(dto.estimatedDurationMin),
         ...amounts,
+        // Snapshot of every input, so the order reproduces its price even
+        // after the rate card or the demand rules change.
+        breakdown: {
+          rateRuleId: rule.id,
+          rateCardId: rule.rateCardId,
+          baseFare: Number(rule.baseFare),
+          pricePerKm: Number(rule.pricePerKM),
+          pricePerMinute: Number(rule.pricePerMinute),
+          minimumFare: Number(rule.minimumFare),
+          taxRate: TAX_RATE,
+          distanceKm: dto.distanceKm,
+          estimatedDurationMin: Math.round(dto.estimatedDurationMin),
+          requireHelper: dto.requireHelper ?? false,
+          nightService: dto.nightService ?? false,
+          ...amounts,
+          demand: demand ? { ...demand } : null,
+        },
         expiresAt: new Date(Date.now() + QUOTE_TTL_MS),
       },
     });
@@ -261,6 +313,11 @@ export class PricingService {
       }
     }
 
+    const demand = await this.demandFor(
+      input,
+      categories.map((category) => category.id),
+    );
+
     const quantity = Math.max(1, Math.round(input.quantity ?? 1));
     const totalWeightKg = (input.weightKg ?? 0) * quantity;
     const totalVolumeM3 = (input.volumeM3 ?? 0) * quantity;
@@ -274,6 +331,8 @@ export class PricingService {
         totalWeightKg <= maxWeightKg &&
         (totalVolumeM3 === 0 || totalVolumeM3 <= maxVolumenM3);
       const rule = ruleByCategory.get(category.id);
+      const categoryDemand = demand.get(category.id);
+      const multiplier = categoryDemand?.appliedMultiplier ?? 1;
 
       return {
         vehicleCategoryId: category.id,
@@ -282,7 +341,12 @@ export class PricingService {
         baseCapacityNote: category.baseCapacityNote,
         maxWeightKg,
         maxVolumenM3,
-        totalAmount: rule ? priceFor(rule, input).totalAmount : null,
+        totalAmount: rule
+          ? priceFor(rule, input, multiplier).totalAmount
+          : null,
+        demandMultiplier: multiplier,
+        demandBand: categoryDemand?.band ?? null,
+        noSupply: categoryDemand?.noSupply ?? null,
         fits: fits && Boolean(rule),
         ...(!rule
           ? { unavailable: 'NO_RATE' as const }
@@ -474,7 +538,8 @@ function activeRateCardWhere(): Prisma.RateCardWhereInput {
  *
  * Both the preview that prices the category cards and the quote that is saved
  * with the order call this. Duplicating it is exactly how the price a customer
- * was shown stops matching the price they are charged.
+ * was shown stops matching the price they are charged. The arithmetic itself
+ * is `computeFare`; this maps a rate rule onto it.
  */
 export function priceFor(
   rule: RateRule,
@@ -484,30 +549,32 @@ export function priceFor(
     requireHelper?: boolean;
     nightService?: boolean;
   },
+  demandMultiplier = 1,
 ): QuoteAmounts {
-  const baseFare = Number(rule.baseFare);
-  const pricePerKm = Number(rule.pricePerKM);
-  const pricePerMinute = Number(rule.pricePerMinute);
-  const minimumFare = Number(rule.minimumFare);
   const helperFee = input.requireHelper ? Number(rule.helperFee) : 0;
   const nightFee = input.nightService ? Number(rule.nightFee) : 0;
 
-  const variableAmount =
-    input.distanceKm * pricePerKm + input.estimatedDurationMin * pricePerMinute;
-  const baseAmount = Math.max(baseFare + variableAmount, minimumFare);
-  const extrasAmount = helperFee + nightFee;
-  const demandAmount = 0;
-  const weatherAmount = 0;
-  const taxAmount = (baseAmount + extrasAmount) * TAX_RATE;
+  const fare = computeFare({
+    baseFare: Number(rule.baseFare),
+    pricePerKm: Number(rule.pricePerKM),
+    pricePerMinute: Number(rule.pricePerMinute),
+    minimumFare: Number(rule.minimumFare),
+    distanceKm: input.distanceKm,
+    durationMin: input.estimatedDurationMin,
+    demandMultiplier,
+    // Helper and night fees are charges on top of the service: the demand
+    // multiplier never scales them.
+    otherCharges: helperFee + nightFee,
+    taxRate: TAX_RATE,
+  });
 
   return {
-    baseAmount,
-    extrasAmount,
-    demandAmount,
-    weatherAmount,
-    taxAmount,
-    totalAmount:
-      baseAmount + extrasAmount + demandAmount + weatherAmount + taxAmount,
+    baseAmount: fare.serviceBeforeDemand,
+    extrasAmount: fare.otherCharges,
+    demandAmount: fare.demandAmount,
+    weatherAmount: 0,
+    taxAmount: fare.taxAmount,
+    totalAmount: fare.total,
   };
 }
 

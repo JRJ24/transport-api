@@ -133,6 +133,30 @@ export const envSchema = z
     REDIS_PORT: z.coerce.number().int().positive().default(6379),
     NOTIFICATIONS_QUEUE_DRIVER: z.enum(['bullmq', 'inline']).optional(),
 
+    // ── Driver matching (H3 presence + ranking) ─────────────────────────────
+    MATCHING_H3_RES: z.coerce.number().int().min(5).max(10).default(8),
+    MATCHING_MAX_RINGS: z.coerce.number().int().min(0).max(10).default(3),
+    MATCHING_MIN_CANDIDATES: z.coerce.number().int().positive().default(5),
+    MATCHING_MAX_MATRIX: z.coerce.number().int().min(1).max(50).default(25),
+    PRESENCE_TTL_SEC: z.coerce.number().int().positive().default(60),
+    PRESENCE_MAX_ACCURACY_M: z.coerce.number().positive().optional(),
+    PRESENCE_MIN_INTERVAL_MS: z.coerce.number().int().min(0).default(3000),
+    MATCHING_AUTO_OFFER: z.enum(['off', 'on']).default('off'),
+    OFFER_TTL_SEC: z.coerce.number().int().min(5).default(30),
+    MATCHING_SCORE_VERSION: z.string().default('v1'),
+    MATCHING_MANUAL_ENFORCE: z.enum(['off', 'on']).default('off'),
+    MATCHING_SWEEP_MS: z.coerce.number().int().min(2000).default(10_000),
+    MATCHING_RETRY_COOLDOWN_SEC: z.coerce.number().int().min(5).default(60),
+
+    // ── Demand multiplier (H3 supply/demand) ────────────────────────────────
+    DEMAND_PRICING: z.enum(['off', 'shadow', 'on']).default('off'),
+    DEMAND_H3_RES: z.coerce.number().int().min(4).max(9).default(7),
+    DEMAND_WINDOW_SEC: z.coerce.number().int().positive().default(600),
+    DEMAND_MIN_OBSERVATIONS: z.coerce.number().int().min(0).default(3),
+    DEMAND_MAX_MULTIPLIER: z.coerce.number().min(1).max(3).default(1.35),
+    DEMAND_SMOOTHING: z.coerce.number().gt(0).max(1).default(0.5),
+    DEMAND_HYSTERESIS: z.coerce.number().min(0).default(0.2),
+
     // ── WhatsApp Business / 360dialog lead notifications ────────────────────
     WHATSAPP_PROVIDER: z
       .enum(['disabled', 'meta', '360dialog', 'DISABLED', 'META', '360DIALOG'])

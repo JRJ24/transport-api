@@ -15,9 +15,14 @@ import { TokenType } from '@/common/enums/token-type.enum';
 import { permissionsForRoles } from '@/common/enums/permission.enum';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import type { JwtPayload } from '@/common/interfaces/jwt-payload.interface';
-import { appConfig, authConfig } from '@/config';
+import { appConfig, authConfig, matchingConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
 import { SessionsService } from '@/modules/identity/sessions/sessions.service';
+import {
+  PresenceService,
+  type PresenceInput,
+  type PresenceResult,
+} from '@/modules/operations/presence/presence.service';
 
 interface TrackingLocationPayload {
   driverId?: string;
@@ -40,10 +45,13 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     private readonly jwtService: JwtService,
     private readonly sessionsService: SessionsService,
     private readonly prisma: PrismaService,
+    private readonly presence: PresenceService,
     @Inject(appConfig.KEY)
     private readonly app: ConfigType<typeof appConfig>,
     @Inject(authConfig.KEY)
     private readonly auth: ConfigType<typeof authConfig>,
+    @Inject(matchingConfig.KEY)
+    private readonly matching: ConfigType<typeof matchingConfig>,
   ) {}
 
   onModuleInit(): void {
@@ -133,7 +141,11 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     createdAt: string;
   }): void {
     this.io?.to('tracking:operations').emit('order.created', payload);
-    this.io?.to('drivers:requests').emit('order.created', payload);
+    // With automatic offers on, drivers hear about an order only through an
+    // offer made to them, never through a broadcast they could race on.
+    if (this.matching.autoOffer !== 'on') {
+      this.io?.to('drivers:requests').emit('order.created', payload);
+    }
   }
 
   /** Notifies the assigned driver and TMS when an assignment is created. */
@@ -149,6 +161,21 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       ?.to(`driver:${payload.driverId}`)
       .emit('assignment.created', payload);
     this.io?.to('tracking:operations').emit('assignment.created', payload);
+  }
+
+  /** A dispatch offer was made to a driver, or its state changed. */
+  emitOfferUpdated(payload: {
+    offerId: string;
+    orderId: string;
+    driverId: string;
+    status: string;
+    mode: string;
+    rank: number;
+    etaSeconds: number | null;
+    expiresAt: string | null;
+  }): void {
+    this.io?.to(`driver:${payload.driverId}`).emit('offer.updated', payload);
+    this.io?.to('tracking:operations').emit('offer.updated', payload);
   }
 
   /** Broadcasts a new incident to operators watching the control tower. */
@@ -232,6 +259,33 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
         await socket.leave(`order:${payload.orderId}`);
       }
     });
+
+    // Presence of an available driver, used for H3 candidate search. Unlike
+    // tracking:driver-location it needs no order and is never persisted in
+    // Postgres: it lives in Redis for PRESENCE_TTL_SEC and then disappears,
+    // which is also why a dropped socket needs no explicit cleanup.
+    socket.on(
+      'driver:presence',
+      async (
+        payload: PresenceInput,
+        ack?: (
+          response: PresenceResult | { accepted: false; reason: string },
+        ) => void,
+      ) => {
+        if (!user.roles.includes(ROLES.DRIVER)) {
+          ack?.({ accepted: false, reason: 'NOT_A_DRIVER' });
+          return;
+        }
+        try {
+          ack?.(await this.presence.recordForUser(user.id, payload));
+        } catch (error) {
+          this.logger.error(
+            `Presence failed for ${user.id}: ${error instanceof Error ? error.message : 'unknown'}`,
+          );
+          ack?.({ accepted: false, reason: 'PRESENCE_UNAVAILABLE' });
+        }
+      },
+    );
 
     socket.on(
       'tracking:driver-location',

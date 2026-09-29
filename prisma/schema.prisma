@@ -174,6 +174,23 @@ enum ASSIGNMENT_STATUS {
   @@schema("ORDERS")
 }
 
+enum OFFER_STATUS {
+  PENDING
+  ACCEPTED
+  REJECTED
+  EXPIRED
+  CANCELLED
+
+  @@schema("ORDERS")
+}
+
+enum OFFER_MODE {
+  MANUAL
+  AUTO
+
+  @@schema("ORDERS")
+}
+
 enum EVENT_TYPE {
   CREATED
   ASSIGNED
@@ -539,6 +556,7 @@ model DriverProfile {
   orderAssignments OrderAssignment[] @relation("DRIVER_ORDER")
   driverLocations  DriverLocation[]  @relation("DRIVER_LOCATIONS")
   trackingSessions TrackingSession[] @relation("DRIVER_TRACKING")
+  driverOffers     DriverOffer[]     @relation("DRIVER_OFFERS")
 
   @@index([licenseNumber])
   @@map("driver_profiles")
@@ -719,6 +737,7 @@ model TransportOrder {
   payments           Payment[]           @relation("ORDERS_PAYMENTS")
   refunds            Refund[]            @relation("REFUNDS_ORDERS")
   creditMovements    CustomerCreditMovement[] @relation("ORDER_CREDIT_MOVEMENTS")
+  driverOffers       DriverOffer[]       @relation("ORDER_DRIVER_OFFERS")
 
   @@index([orderCode])
   @@index([customerId])
@@ -794,6 +813,37 @@ model OrderAssignment {
   @@index([driverId])
   @@index([vehicleId])
   @@map("order_assignments")
+  @@schema("ORDERS")
+}
+
+/// One dispatch offer of an order to a driver, manual (TMS) or automatic
+/// (cascade). `snapshot` keeps the ranking row the offer was made from, so the
+/// decision can be explained later even after the rules change.
+model DriverOffer {
+  id           String       @id @default(uuid())
+  orderId      String       @map("order_id")
+  driverId     String       @map("driver_id")
+  vehicleId    String       @map("vehicle_id")
+  rank         Int
+  score        Decimal?     @db.Decimal(6, 4)
+  etaSeconds   Int?         @map("eta_seconds")
+  scoreVersion String       @map("score_version")
+  mode         OFFER_MODE
+  status       OFFER_STATUS @default(PENDING)
+  expiresAt    DateTime?    @map("expires_at")
+  respondedAt  DateTime?    @map("responded_at")
+  actorUserId  String?      @map("actor_user_id")
+  reason       String?
+  snapshot     Json?
+  assignmentId String?      @map("assignment_id")
+  createdAt    DateTime     @default(now()) @map("created_at")
+
+  order  TransportOrder @relation("ORDER_DRIVER_OFFERS", fields: [orderId], references: [id])
+  driver DriverProfile  @relation("DRIVER_OFFERS", fields: [driverId], references: [id])
+
+  @@index([orderId, status])
+  @@index([driverId, createdAt])
+  @@map("driver_offers")
   @@schema("ORDERS")
 }
 

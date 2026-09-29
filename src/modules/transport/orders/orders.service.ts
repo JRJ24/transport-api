@@ -678,6 +678,10 @@ export class OrdersService {
   async findAvailableForDrivers(
     user: AuthenticatedUser,
   ): Promise<TransportOrder[]> {
+    // In automatic mode drivers receive ranked offers instead of a job board.
+    if (!this.assignments.selfDispatchEnabled) {
+      return [];
+    }
     const driver = await this.prisma.driverProfile.findFirst({
       where: { userId: user.id },
       select: {

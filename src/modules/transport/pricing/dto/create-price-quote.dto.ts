@@ -7,6 +7,7 @@ import {
   IsString,
   IsUUID,
   Length,
+  Max,
   Min,
 } from 'class-validator';
 
@@ -46,4 +47,26 @@ export class CreatePriceQuoteDto {
   @IsOptional()
   @IsBoolean()
   nightService?: boolean;
+
+  @ApiPropertyOptional({
+    example: 18.4861,
+    description: 'Pickup latitude, used for the demand multiplier',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-90)
+  @Max(90)
+  originLatitude?: number;
+
+  @ApiPropertyOptional({
+    example: -69.9312,
+    description: 'Pickup longitude, used for the demand multiplier',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-180)
+  @Max(180)
+  originLongitude?: number;
 }
