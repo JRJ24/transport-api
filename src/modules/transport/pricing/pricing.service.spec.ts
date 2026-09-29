@@ -210,10 +210,23 @@ describe('priceFor', () => {
 
     expect(withHelper.extrasAmount).toBe(200);
     expect(withHelper.totalAmount).toBeGreaterThan(plain.totalAmount);
-    // ITBIS applies to the fare plus the extras.
+    // ITBIS applies to the fare plus the extras, rounded to cents.
     expect(withHelper.taxAmount).toBeCloseTo(
       (withHelper.baseAmount + withHelper.extrasAmount) * 0.18,
-      6,
+      2,
+    );
+  });
+
+  it('applies demand to the service fare only, never to the extras', () => {
+    const plain = priceFor(rule(), { ...route, requireHelper: true });
+    const busy = priceFor(rule(), { ...route, requireHelper: true }, 1.2);
+
+    expect(busy.baseAmount).toBe(plain.baseAmount);
+    expect(busy.extrasAmount).toBe(plain.extrasAmount);
+    expect(busy.demandAmount).toBeCloseTo(plain.baseAmount * 0.2, 2);
+    expect(busy.totalAmount).toBeCloseTo(
+      busy.baseAmount + busy.extrasAmount + busy.demandAmount + busy.taxAmount,
+      2,
     );
   });
 

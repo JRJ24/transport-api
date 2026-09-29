@@ -34,6 +34,7 @@ export function orderStatusLabel(status: string): string {
 export type NotificationEvent =
   | 'ORDER_CREATED'
   | 'ORDER_ASSIGNED'
+  | 'ORDER_OFFERED'
   | 'ORDER_REASSIGNED'
   | 'ORDER_CANCELLED'
   | 'ORDER_STATUS_CHANGED'
@@ -94,6 +95,22 @@ const TEMPLATES: Record<NotificationEvent, Builder> = {
       screen: 'order-detail',
       orderId: ctx.orderId,
       orderCode: ctx.orderCode,
+    }),
+  }),
+  ORDER_OFFERED: (ctx) => ({
+    category: NOTIFICATION_TYPE.ORDER_UPDATE,
+    title: 'Nueva oferta de viaje',
+    message:
+      `Tienes una oferta ${ctx.orderCode ?? ''} cerca de ti. Responde antes de que venza.`
+        .replace(/\s+/g, ' ')
+        .trim(),
+    data: dropUndefined({
+      type: 'ORDER_OFFERED',
+      screen: 'order-offer',
+      orderId: ctx.orderId,
+      orderCode: ctx.orderCode,
+      offerId: ctx.offerId,
+      expiresAt: ctx.expiresAt,
     }),
   }),
   ORDER_REASSIGNED: (ctx) => ({

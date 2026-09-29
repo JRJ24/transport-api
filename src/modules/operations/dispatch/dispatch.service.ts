@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import type { OrderAssignment } from '@generated/prisma/client';
+import type { DriverOffer, OrderAssignment } from '@generated/prisma/client';
 import {
   PAYMENT_STATUS,
   STATUS_DRIVER,
@@ -8,8 +8,13 @@ import {
 } from '@generated/prisma/enums';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
-import { AssignmentsService } from '../assignments/assignments.service';
-import type { DispatchOrderDto } from './dto/dispatch-order.dto';
+import { MatchingService } from '../matching/matching.service';
+import type { MatchingResult } from '../matching/matching.types';
+import { OffersService } from '../offers/offers.service';
+import type {
+  AssignCandidateDto,
+  DispatchOrderDto,
+} from './dto/dispatch-order.dto';
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -25,7 +30,8 @@ const SAFE_USER_SELECT = {
 export class DispatchService {
   constructor(
     private readonly prisma: PrismaService,
-    private readonly assignments: AssignmentsService,
+    private readonly matching: MatchingService,
+    private readonly offersService: OffersService,
   ) {}
 
   pendingOrders() {
@@ -50,10 +56,35 @@ export class DispatchService {
     });
   }
 
+  /** Same ranking the automatic cascade uses, plus why others are out. */
+  candidates(orderId: string): Promise<MatchingResult> {
+    return this.matching.rankForOrder(orderId, { emitAlerts: true });
+  }
+
+  offers(orderId: string): Promise<DriverOffer[]> {
+    return this.offersService.listForOrder(orderId);
+  }
+
+  assign(
+    user: AuthenticatedUser,
+    orderId: string,
+    dto: AssignCandidateDto,
+  ): Promise<OrderAssignment> {
+    return this.offersService.manualAssign(user, orderId, dto);
+  }
+
+  /**
+   * Legacy dispatch body. It now goes through the same revalidation and audit
+   * as a pick from the ranking.
+   */
   dispatch(
     user: AuthenticatedUser,
     dto: DispatchOrderDto,
   ): Promise<OrderAssignment> {
-    return this.assignments.create(user, dto);
+    return this.offersService.manualAssign(user, dto.orderId, {
+      driverId: dto.driverId,
+      vehicleId: dto.vehicleId,
+      reason: dto.reason,
+    });
   }
 }

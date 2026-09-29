@@ -11,7 +11,10 @@ import type {
   ComputeRouteInput,
   LatLng,
   RouteLeg,
+  RouteMatrixElement,
+  RouteMatrixResult,
 } from './interfaces/route.interface';
+import { haversineMeters } from '@/common/utils/geo.util';
 
 /**
  * Consumes the Google Routes API v2 (`computeRoutes`) server-side only. The API
@@ -33,6 +36,15 @@ export class GoogleRoutesService {
     'routes.legs.distanceMeters',
     'routes.legs.duration',
     'routes.viewport',
+  ].join(',');
+
+  private static readonly MATRIX_FIELD_MASK = [
+    'originIndex',
+    'destinationIndex',
+    'status',
+    'condition',
+    'distanceMeters',
+    'duration',
   ].join(',');
 
   constructor(
@@ -83,6 +95,97 @@ export class GoogleRoutesService {
     } catch (error) {
       this.handleProviderError(error);
     }
+  }
+
+  /**
+   * Driving ETA from many origins to few destinations in one billed call
+   * (`computeRouteMatrix`). Used to rank drivers by time to the pickup, which
+   * straight-line distance or H3 rings cannot tell.
+   *
+   * Elements the provider could not route come back with a non-OK status and
+   * null figures; a transport failure throws like `computeRoute`.
+   */
+  async computeRouteMatrix(
+    origins: LatLng[],
+    destinations: LatLng[],
+  ): Promise<RouteMatrixResult> {
+    if (origins.length === 0 || destinations.length === 0) {
+      return {
+        elements: [],
+        provider: this.isConfigured ? 'google-routes' : 'internal-mock',
+        computedAt: new Date().toISOString(),
+      };
+    }
+
+    if (!this.isConfigured) {
+      return this.internalMatrixMock(origins, destinations);
+    }
+
+    const url = `${this.config.routesBaseUrl}/distanceMatrix/v2:computeRouteMatrix`;
+
+    try {
+      const body = {
+        origins: origins.map((point) => ({
+          waypoint: this.toWaypoint(point),
+        })),
+        destinations: destinations.map((point) => ({
+          waypoint: this.toWaypoint(point),
+        })),
+        travelMode: 'DRIVE',
+        routingPreference: 'TRAFFIC_AWARE',
+      };
+
+      const response = await axios.post(url, body, {
+        timeout: this.config.routesTimeoutMs,
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': this.config.serverApiKey,
+          'X-Goog-FieldMask': GoogleRoutesService.MATRIX_FIELD_MASK,
+        },
+      });
+
+      return {
+        elements: this.mapMatrixResponse(response.data),
+        provider: 'google-routes',
+        computedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      this.handleProviderError(error);
+    }
+  }
+
+  private mapMatrixResponse(data: unknown): RouteMatrixElement[] {
+    if (!Array.isArray(data)) {
+      throw new GoogleRoutesError('Route provider returned an invalid matrix');
+    }
+
+    return data.map((raw) => {
+      const element = raw as {
+        originIndex?: number;
+        destinationIndex?: number;
+        status?: { code?: number; message?: string };
+        condition?: string;
+        distanceMeters?: number;
+        duration?: string;
+      };
+      // An element-level error carries a google.rpc.Status with a non-zero code.
+      const failed = Boolean(element.status?.code);
+      const routed = element.condition === 'ROUTE_EXISTS';
+      const status: RouteMatrixElement['status'] = failed
+        ? 'ERROR'
+        : routed
+          ? 'OK'
+          : 'ROUTE_NOT_FOUND';
+
+      return {
+        originIndex: element.originIndex ?? 0,
+        destinationIndex: element.destinationIndex ?? 0,
+        status,
+        distanceMeters: status === 'OK' ? (element.distanceMeters ?? 0) : null,
+        durationSeconds:
+          status === 'OK' ? this.parseDuration(element.duration) : null,
+      };
+    });
   }
 
   private toWaypoint(point: LatLng) {
@@ -216,20 +319,32 @@ export class GoogleRoutesService {
     };
   }
 
-  private haversineMeters(a: LatLng, b: LatLng): number {
-    const R = 6_371_000;
-    const dLat = this.toRad(b.latitude - a.latitude);
-    const dLon = this.toRad(b.longitude - a.longitude);
-    const lat1 = this.toRad(a.latitude);
-    const lat2 = this.toRad(b.latitude);
-    const h =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
-    return R * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  private internalMatrixMock(
+    origins: LatLng[],
+    destinations: LatLng[],
+  ): RouteMatrixResult {
+    const elements: RouteMatrixElement[] = [];
+    origins.forEach((origin, originIndex) => {
+      destinations.forEach((destination, destinationIndex) => {
+        const meters = this.haversineMeters(origin, destination);
+        elements.push({
+          originIndex,
+          destinationIndex,
+          status: 'OK',
+          distanceMeters: Math.round(meters),
+          durationSeconds: Math.round((meters / 1000 / 30) * 3600),
+        });
+      });
+    });
+    return {
+      elements,
+      provider: 'internal-mock',
+      computedAt: new Date().toISOString(),
+    };
   }
 
-  private toRad(value: number): number {
-    return (value * Math.PI) / 180;
+  private haversineMeters(a: LatLng, b: LatLng): number {
+    return haversineMeters(a, b);
   }
 
   private boundsOf(points: LatLng[]): ComputedRoute['bounds'] {

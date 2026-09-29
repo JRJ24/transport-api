@@ -2,10 +2,12 @@ import {
   BadRequestException,
   ConflictException,
   ForbiddenException,
+  Inject,
   Injectable,
   Logger,
   NotFoundException,
 } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import type { OrderAssignment, Prisma } from '@generated/prisma/client';
 import {
   ASSIGNMENT_STATUS,
@@ -19,10 +21,12 @@ import {
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
+import { matchingConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import { orderStatusLabel } from '@/modules/support/notifications/templates/notification.templates';
+import { PresenceService } from '../presence/presence.service';
 import type { CreateAssignmentDto } from './dto/create-assignment.dto';
 
 const SAFE_USER_SELECT = {
@@ -51,6 +55,21 @@ const DISPATCHABLE_PAYMENT_STATUSES: PAYMENT_STATUS[] = [
   PAYMENT_STATUS.AUTHORIZED,
 ];
 
+/**
+ * Hooks run inside the claim transaction, so a dispatch offer and the
+ * assignment it produces commit or roll back together.
+ */
+export interface ClaimHooks {
+  /** Set by the offer flow; plain self-dispatch is refused in auto mode. */
+  viaOffer?: boolean;
+  /** Runs first; throw to abort (e.g. the offer expired meanwhile). */
+  beforeClaim?: (tx: Prisma.TransactionClient) => Promise<void>;
+  afterClaim?: (
+    tx: Prisma.TransactionClient,
+    assignment: OrderAssignment,
+  ) => Promise<void>;
+}
+
 @Injectable()
 export class AssignmentsService {
   private readonly logger = new Logger(AssignmentsService.name);
@@ -59,7 +78,18 @@ export class AssignmentsService {
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationDispatcherService,
     private readonly realtime: RealtimeService,
+    private readonly presence: PresenceService,
+    @Inject(matchingConfig.KEY)
+    private readonly matching: ConfigType<typeof matchingConfig>,
   ) {}
+
+  /**
+   * First-come self-dispatch competes with ranked offers, so it is switched
+   * off while automatic offers are on.
+   */
+  get selfDispatchEnabled(): boolean {
+    return this.matching.autoOffer !== 'on';
+  }
 
   /**
    * Notifies the ORDER OWNER that its status changed (best-effort).
@@ -261,6 +291,8 @@ export class AssignmentsService {
       return created;
     });
 
+    // A busy driver must not show up as a candidate for the next order.
+    await this.presence.remove(dto.driverId);
     await this.notifyDriverAssigned(dto.driverId, dto.orderId);
     this.realtime.emitAssignmentCreated({
       assignmentId: assignment.id,
@@ -283,7 +315,16 @@ export class AssignmentsService {
     user: AuthenticatedUser,
     orderId: string,
     vehicleId: string,
+    hooks: ClaimHooks = {},
   ): Promise<OrderAssignment> {
+    if (!hooks.viaOffer && !this.selfDispatchEnabled) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message:
+          'Self-dispatch is disabled while automatic offers are on; wait for an offer',
+      });
+    }
+
     const driver = await this.prisma.driverProfile.findFirst({
       where: { userId: user.id },
       select: {
@@ -333,6 +374,8 @@ export class AssignmentsService {
     );
 
     const assignment = await this.prisma.$transaction(async (tx) => {
+      await hooks.beforeClaim?.(tx);
+
       const claimedOrder = await tx.transportOrder.updateMany({
         where: {
           id: orderId,
@@ -376,10 +419,12 @@ export class AssignmentsService {
       });
 
       await this.recordEvent(tx, orderId, user.id, EVENT_TYPE.ACCEPTED);
+      await hooks.afterClaim?.(tx, created);
 
       return created;
     });
 
+    await this.presence.remove(driver.id);
     this.realtime.emitAssignmentCreated({
       assignmentId: assignment.id,
       orderId: assignment.orderId,
@@ -401,18 +446,32 @@ export class AssignmentsService {
   async accept(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
     const assignment = await this.prisma.$transaction(async (tx) => {
       await this.assertCanMutateAssignment(tx, id, user);
-      const assignment = await tx.orderAssignment.update({
-        where: { id },
-        data: {
+      // Compare-and-set: two concurrent accepts, or an accept racing a
+      // reject, must leave exactly one outcome.
+      await this.transition(
+        tx,
+        id,
+        ASSIGNMENT_STATUS.PENDING,
+        {
           assignmentStatus: ASSIGNMENT_STATUS.ACCEPTED,
           acceptedAt: new Date(),
         },
+        'Assignment is no longer pending',
+      );
+      const assignment = await tx.orderAssignment.findUniqueOrThrow({
+        where: { id },
       });
 
-      await tx.transportOrder.update({
-        where: { id: assignment.orderId },
+      const order = await tx.transportOrder.updateMany({
+        where: { id: assignment.orderId, status: STATUS_ORDERS.ASSIGNED },
         data: { status: STATUS_ORDERS.ACCEPTED },
       });
+      if (order.count !== 1) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'Order is no longer waiting for this driver',
+        });
+      }
       await this.recordEvent(
         tx,
         assignment.orderId,
@@ -436,20 +495,29 @@ export class AssignmentsService {
   async reject(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
     const assignment = await this.prisma.$transaction(async (tx) => {
       await this.assertCanMutateAssignment(tx, id, user);
-      const assignment = await tx.orderAssignment.update({
-        where: { id },
-        data: {
+      await this.transition(
+        tx,
+        id,
+        ASSIGNMENT_STATUS.PENDING,
+        {
           assignmentStatus: ASSIGNMENT_STATUS.REJECTED,
           rejectedAt: new Date(),
         },
+        'Assignment is no longer pending',
+      );
+      const assignment = await tx.orderAssignment.findUniqueOrThrow({
+        where: { id },
       });
 
-      await tx.transportOrder.update({
-        where: { id: assignment.orderId },
+      await tx.transportOrder.updateMany({
+        where: { id: assignment.orderId, status: STATUS_ORDERS.ASSIGNED },
         data: { status: STATUS_ORDERS.REQUESTED },
       });
-      await tx.driverProfile.update({
-        where: { id: assignment.driverId },
+      await tx.driverProfile.updateMany({
+        where: {
+          id: assignment.driverId,
+          availabilityStatus: STATUS_DRIVER.BUSY,
+        },
         data: { availabilityStatus: STATUS_DRIVER.AVAILABLE },
       });
 
@@ -475,17 +543,54 @@ export class AssignmentsService {
 
   complete(id: string): Promise<OrderAssignment> {
     return this.prisma.$transaction(async (tx) => {
-      const assignment = await tx.orderAssignment.update({
+      await this.transition(
+        tx,
+        id,
+        ASSIGNMENT_STATUS.ACCEPTED,
+        { assignmentStatus: ASSIGNMENT_STATUS.COMPLETED },
+        'Only an accepted assignment can be completed',
+      );
+      const assignment = await tx.orderAssignment.findUniqueOrThrow({
         where: { id },
-        data: { assignmentStatus: ASSIGNMENT_STATUS.COMPLETED },
       });
 
-      await tx.driverProfile.update({
-        where: { id: assignment.driverId },
+      await tx.driverProfile.updateMany({
+        where: {
+          id: assignment.driverId,
+          availabilityStatus: STATUS_DRIVER.BUSY,
+        },
         data: { availabilityStatus: STATUS_DRIVER.AVAILABLE },
       });
 
       return assignment;
+    });
+  }
+
+  /** Moves an assignment out of `from`, or fails if someone got there first. */
+  private async transition(
+    tx: Prisma.TransactionClient,
+    id: string,
+    from: ASSIGNMENT_STATUS,
+    data: Prisma.OrderAssignmentUpdateManyMutationInput,
+    conflictMessage: string,
+  ): Promise<void> {
+    const moved = await tx.orderAssignment.updateMany({
+      where: { id, assignmentStatus: from },
+      data,
+    });
+    if (moved.count === 1) {
+      return;
+    }
+    const exists = await tx.orderAssignment.count({ where: { id } });
+    if (exists === 0) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Assignment not found',
+      });
+    }
+    throw new ConflictException({
+      code: ERROR_CODES.RESOURCE_CONFLICT,
+      message: conflictMessage,
     });
   }
 

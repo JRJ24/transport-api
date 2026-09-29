@@ -168,3 +168,94 @@ describe('GoogleRoutesService', () => {
     expect(mockedAxios.post).not.toHaveBeenCalled();
   });
 });
+
+describe('GoogleRoutesService.computeRouteMatrix', () => {
+  const pickup = { latitude: 18.4735, longitude: -69.9406 };
+  const origins = [
+    { latitude: 18.48, longitude: -69.94 },
+    { latitude: 18.49, longitude: -69.93 },
+    { latitude: 18.5, longitude: -69.92 },
+  ];
+
+  beforeEach(() => {
+    mockedAxios.post.mockReset();
+  });
+
+  it('maps each element and keeps unroutable ones without figures', async () => {
+    mockedAxios.post.mockResolvedValue({
+      data: [
+        {
+          originIndex: 1,
+          destinationIndex: 0,
+          condition: 'ROUTE_EXISTS',
+          distanceMeters: 4200,
+          duration: '540s',
+        },
+        { originIndex: 0, destinationIndex: 0, condition: 'ROUTE_NOT_FOUND' },
+        {
+          originIndex: 2,
+          destinationIndex: 0,
+          status: { code: 3, message: 'bad waypoint' },
+        },
+      ],
+    });
+
+    const result = await makeService('key').computeRouteMatrix(origins, [
+      pickup,
+    ]);
+
+    expect(result.provider).toBe('google-routes');
+    expect(result.elements).toEqual([
+      {
+        originIndex: 1,
+        destinationIndex: 0,
+        status: 'OK',
+        distanceMeters: 4200,
+        durationSeconds: 540,
+      },
+      {
+        originIndex: 0,
+        destinationIndex: 0,
+        status: 'ROUTE_NOT_FOUND',
+        distanceMeters: null,
+        durationSeconds: null,
+      },
+      {
+        originIndex: 2,
+        destinationIndex: 0,
+        status: 'ERROR',
+        distanceMeters: null,
+        durationSeconds: null,
+      },
+    ]);
+    const [url, body, options] = mockedAxios.post.mock.calls[0];
+    expect(url).toBe(
+      'https://routes.googleapis.com/distanceMatrix/v2:computeRouteMatrix',
+    );
+    expect((body as { origins: unknown[] }).origins).toHaveLength(3);
+    expect(
+      (options as { headers: Record<string, string> }).headers[
+        'X-Goog-FieldMask'
+      ],
+    ).toContain('condition');
+  });
+
+  it('raises a typed error when the provider fails as a whole', async () => {
+    mockedAxios.post.mockRejectedValue(axiosFailure({ status: 403 }));
+
+    await expect(
+      makeService('key').computeRouteMatrix(origins, [pickup]),
+    ).rejects.toMatchObject({ reason: 'provider-denied' });
+  });
+
+  it('serves a straight-line estimate offline without calling Google', async () => {
+    const result = await makeService('').computeRouteMatrix(origins, [pickup]);
+
+    expect(mockedAxios.post).not.toHaveBeenCalled();
+    expect(result.provider).toBe('internal-mock');
+    expect(result.elements).toHaveLength(3);
+    expect(result.elements.every((element) => element.status === 'OK')).toBe(
+      true,
+    );
+  });
+});

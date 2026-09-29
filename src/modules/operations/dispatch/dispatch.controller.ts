@@ -1,11 +1,19 @@
-import { Body, Controller, Get, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import type { OrderAssignment } from '@generated/prisma/client';
+import type { DriverOffer, OrderAssignment } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
-import { DispatchOrderDto } from './dto/dispatch-order.dto';
+import type { MatchingResult } from '../matching/matching.types';
+import { AssignCandidateDto, DispatchOrderDto } from './dto/dispatch-order.dto';
 import { DispatchService } from './dispatch.service';
 
 @ApiTags('dispatch')
@@ -25,6 +33,31 @@ export class DispatchController {
   @Get('available-drivers')
   availableDrivers() {
     return this.service.availableDrivers();
+  }
+
+  @ApiOperation({
+    summary:
+      'Ranked drivers for an order (H3 proximity, road ETA) with exclusion reasons',
+  })
+  @Get('orders/:id/candidates')
+  candidates(@Param('id', ParseUUIDPipe) id: string): Promise<MatchingResult> {
+    return this.service.candidates(id);
+  }
+
+  @ApiOperation({ summary: 'Dispatch offers made for an order (audit trail)' })
+  @Get('orders/:id/offers')
+  offers(@Param('id', ParseUUIDPipe) id: string): Promise<DriverOffer[]> {
+    return this.service.offers(id);
+  }
+
+  @ApiOperation({ summary: 'Assign a ranked candidate to an order' })
+  @Post('orders/:id/assign')
+  assign(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: AssignCandidateDto,
+  ): Promise<OrderAssignment> {
+    return this.service.assign(user, id, dto);
   }
 
   @ApiOperation({ summary: 'Dispatch an order to a driver and vehicle' })

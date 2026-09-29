@@ -6,6 +6,7 @@ import { googleMapsConfig } from '@/integrations/google-maps/google-maps.config'
 import { GoogleRoutesService } from '@/integrations/google-maps/google-routes.service';
 import type { LatLng } from '@/integrations/google-maps/interfaces/route.interface';
 import type { EstimateRouteDto } from './dto/estimate-route.dto';
+import { haversineMeters } from '@/common/utils/geo.util';
 
 export interface RouteEstimateResult {
   originAddress: string;
@@ -166,23 +167,10 @@ export class RoutesService {
     lat2: number,
     lon2: number,
   ): number {
-    const earthRadiusKm = 6371;
-    const dLat = this.toRad(lat2 - lat1);
-    const dLon = this.toRad(lon2 - lon1);
-    const a =
-      Math.sin(dLat / 2) ** 2 +
-      Math.cos(this.toRad(lat1)) *
-        Math.cos(this.toRad(lat2)) *
-        Math.sin(dLon / 2) ** 2;
-
-    return Number(
-      (earthRadiusKm * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))).toFixed(
-        2,
-      ),
+    const meters = haversineMeters(
+      { latitude: lat1, longitude: lon1 },
+      { latitude: lat2, longitude: lon2 },
     );
-  }
-
-  private toRad(value: number): number {
-    return (value * Math.PI) / 180;
+    return Number((meters / 1000).toFixed(2));
   }
 }
