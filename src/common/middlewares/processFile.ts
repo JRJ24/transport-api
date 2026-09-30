@@ -90,6 +90,36 @@ const buildLocalPublicUrl = (req: Request, key: string) => {
   return `${req.protocol}://${req.get('host')}/${key}`;
 };
 
+/**
+ * Stores one object in Spaces (or on local disk when no bucket is set) and
+ * returns its public URL. Shared by the evidence upload below and by avatars.
+ */
+export async function storeObject(input: {
+  key: string;
+  body: Buffer;
+  contentType: string;
+  req: Request;
+}): Promise<string> {
+  const bucketName = getBucketName();
+  if (bucketName) {
+    await s3Client.send(
+      new PutObjectCommand({
+        Bucket: bucketName,
+        Key: input.key,
+        Body: input.body,
+        ContentType: input.contentType,
+        ACL: 'public-read',
+      }),
+    );
+    return buildPublicUrl(bucketName, input.key);
+  }
+
+  const localPath = path.join(getLocalPublicRoot(), ...input.key.split('/'));
+  await mkdir(path.dirname(localPath), { recursive: true });
+  await writeFile(localPath, input.body);
+  return buildLocalPublicUrl(input.req, input.key);
+}
+
 const upload = multer({
   storage,
   limits: {
@@ -128,7 +158,6 @@ export const processFile = (
     }
 
     try {
-      const bucketName = getBucketName();
       const uploadPrefix = process.env.SPACES_UPLOAD_PREFIX || 'evidences';
       const uploadedFiles = await Promise.all(
         files.map(async (file): Promise<UploadedFile> => {
@@ -148,24 +177,12 @@ export const processFile = (
               .toBuffer();
           }
 
-          if (bucketName) {
-            await s3Client.send(
-              new PutObjectCommand({
-                Bucket: bucketName,
-                Key: fileKey,
-                Body: fileBuffer,
-                ContentType: contentType,
-                ACL: 'public-read',
-              }),
-            );
-          } else {
-            const localPath = path.join(
-              getLocalPublicRoot(),
-              ...fileKey.split('/'),
-            );
-            await mkdir(path.dirname(localPath), { recursive: true });
-            await writeFile(localPath, fileBuffer);
-          }
+          const url = await storeObject({
+            key: fileKey,
+            body: fileBuffer,
+            contentType,
+            req,
+          });
 
           return {
             fieldName: file.fieldname,
@@ -174,9 +191,7 @@ export const processFile = (
             originalName: file.originalname,
             mimeType: contentType,
             size: fileBuffer.byteLength,
-            url: bucketName
-              ? buildPublicUrl(bucketName, fileKey)
-              : buildLocalPublicUrl(req, fileKey),
+            url,
           };
         }),
       );

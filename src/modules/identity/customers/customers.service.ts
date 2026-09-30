@@ -20,7 +20,12 @@ import {
   TYPE_CUSTOMER,
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import type { PaginatedResult } from '@/common/interfaces/pagination.interface';
 import { hashPassword } from '@/common/utils/hash.util';
+import {
+  resolvePageParams,
+  toPaginatedResult,
+} from '@/common/utils/pagination.util';
 import { authConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
 import type { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
@@ -523,11 +528,10 @@ export class CustomersService {
       });
     }
 
+    // An active line asks for more room: the current limit and status stay
+    // as they are until an operator approves the new figure.
     if (profile.creditAccount?.status === CREDIT_ACCOUNT_STATUS.ACTIVE) {
-      throw new ConflictException({
-        code: ERROR_CODES.RESOURCE_CONFLICT,
-        message: 'Customer already has active corporate credit',
-      });
+      return this.requestCreditIncrease(userId, profile.creditAccount, dto);
     }
 
     if (profile.creditAccount?.status === CREDIT_ACCOUNT_STATUS.BLOCKED) {
@@ -577,6 +581,105 @@ export class CustomersService {
     });
 
     return account;
+  }
+
+  private async requestCreditIncrease(
+    userId: string,
+    account: CustomerCreditAccount,
+    dto: RequestCustomerCreditDto,
+  ): Promise<CustomerCreditAccount> {
+    if (dto.requestedLimit <= Number(account.creditLimit)) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'The requested limit must be higher than the current one',
+      });
+    }
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    const request = `[${stamp}] Solicitud de aumento a ${dto.requestedLimit.toFixed(2)}${dto.notes?.trim() ? `: ${dto.notes.trim()}` : ''}`;
+    const updated = await this.prisma.customerCreditAccount.update({
+      where: { id: account.id },
+      data: {
+        notes: [account.notes, request].filter(Boolean).join('\n').slice(-2000),
+      },
+    });
+
+    await this.prisma.auditLog.create({
+      data: {
+        actorUserId: userId,
+        action: 'CUSTOMER_CREDIT_INCREASE_REQUESTED',
+        entityType: 'CUSTOMER',
+        entityId: account.customerId,
+        oldValues: { creditLimit: Number(account.creditLimit) },
+        newValues: { requestedLimit: dto.requestedLimit },
+        ipAddress: null,
+        userAgent: null,
+        createdAt: new Date(),
+      },
+    });
+
+    return updated;
+  }
+
+  /** My corporate credit movements, newest first, with order and payment refs. */
+  async listMyCreditMovements(
+    userId: string,
+    query: { page?: number; pageSize?: number },
+  ): Promise<
+    PaginatedResult<{
+      id: string;
+      movementType: string;
+      amount: number;
+      balanceAfter: number;
+      notes: string | null;
+      createdAt: Date;
+      orderId: string | null;
+      orderCode: string | null;
+      paymentId: string | null;
+      paymentMethod: string | null;
+    }>
+  > {
+    const params = resolvePageParams(query);
+    const profile = await this.getProfileOrThrow(userId);
+    const account = await this.prisma.customerCreditAccount.findUnique({
+      where: { customerId: profile.id },
+      select: { id: true },
+    });
+    if (!account) {
+      return toPaginatedResult([], 0, params);
+    }
+
+    const where = { creditAccountId: account.id };
+    const [rows, total] = await Promise.all([
+      this.prisma.customerCreditMovement.findMany({
+        where,
+        include: {
+          order: { select: { orderCode: true } },
+          payment: { select: { paymentMethod: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip: params.skip,
+        take: params.take,
+      }),
+      this.prisma.customerCreditMovement.count({ where }),
+    ]);
+
+    return toPaginatedResult(
+      rows.map((row) => ({
+        id: row.id,
+        movementType: row.movementType,
+        amount: Number(row.amount),
+        balanceAfter: Number(row.balanceAfter),
+        notes: row.notes,
+        createdAt: row.createdAt,
+        orderId: row.orderId,
+        orderCode: row.order?.orderCode ?? null,
+        paymentId: row.paymentId,
+        paymentMethod: row.payment?.paymentMethod ?? null,
+      })),
+      total,
+      params,
+    );
   }
 
   async updateProfile(

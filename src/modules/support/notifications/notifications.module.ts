@@ -6,6 +6,8 @@ import { DeviceTokensService } from './device-tokens.service';
 import { DevicesController } from './devices.controller';
 import { NotificationDispatcherService } from './notification-dispatcher.service';
 import { NOTIFICATIONS_QUEUE } from './notification.queue';
+import { NotificationPreferencesController } from './notification-preferences.controller';
+import { NotificationPreferencesService } from './notification-preferences.service';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsService } from './notifications.service';
 import { NotificationProcessor } from './processors/notification.processor';
@@ -39,15 +41,24 @@ const queueProviders: Provider[] = USE_BULLMQ ? [NotificationProcessor] : [];
 
 @Module({
   imports: [...bullImports],
-  controllers: [NotificationsController, DevicesController],
+  controllers: [
+    NotificationsController,
+    DevicesController,
+    NotificationPreferencesController,
+  ],
   providers: [
     NotificationsService,
     DeviceTokensService,
     PushDeliveryService,
     NotificationDispatcherService,
+    NotificationPreferencesService,
     FirebaseAdminService,
     ...queueProviders,
   ],
-  exports: [NotificationDispatcherService, DeviceTokensService],
+  exports: [
+    NotificationDispatcherService,
+    DeviceTokensService,
+    NotificationPreferencesService,
+  ],
 })
 export class NotificationsModule {}

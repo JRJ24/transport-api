@@ -21,6 +21,7 @@ import {
   STATUS_ORDERS,
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import { DISPATCH_WAITING_STATUSES } from '@/common/constants/order-status.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { matchingConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
@@ -113,6 +114,16 @@ export class OffersService {
       return;
     }
 
+    // An order left in ASSIGNING_DRIVER without an open offer (crash between
+    // two steps, lost job) goes back to the queue instead of hanging there.
+    await this.prisma.transportOrder.updateMany({
+      where: {
+        status: STATUS_ORDERS.ASSIGNING_DRIVER,
+        driverOffers: { none: { status: OFFER_STATUS.PENDING } },
+      },
+      data: { status: STATUS_ORDERS.REQUESTED },
+    });
+
     const orders = await this.prisma.transportOrder.findMany({
       where: {
         status: STATUS_ORDERS.REQUESTED,
@@ -162,6 +173,9 @@ export class OffersService {
     if (await redis.exists(cooldownKey(orderId))) {
       return null;
     }
+    if (!(await this.isWaitingForOffer(orderId))) {
+      return null;
+    }
 
     const previous = await this.prisma.driverOffer.findMany({
       where: { orderId },
@@ -185,6 +199,17 @@ export class OffersService {
         ...ranking.alerts,
         ...(previous.length > 0 ? ['CASCADE_EXHAUSTED'] : []),
       ]);
+      await this.setWaitingStatus(
+        orderId,
+        STATUS_ORDERS.ASSIGNING_DRIVER,
+        STATUS_ORDERS.REQUESTED,
+      );
+      this.realtime.emitMatchingStatus({
+        orderId,
+        state: 'NO_DRIVERS',
+        attempt: previous.length,
+        at: new Date().toISOString(),
+      });
       return null;
     }
 
@@ -215,7 +240,20 @@ export class OffersService {
     }
 
     await this.scheduler.scheduleExpiry(offer.id, this.config.offerTtlSec);
+    await this.setWaitingStatus(
+      orderId,
+      STATUS_ORDERS.REQUESTED,
+      STATUS_ORDERS.ASSIGNING_DRIVER,
+    );
     this.announce(offer);
+    this.realtime.emitMatchingStatus({
+      orderId,
+      state: 'OFFERING',
+      attempt: previous.length + 1,
+      etaSeconds: offer.etaSeconds,
+      expiresAt: offer.expiresAt?.toISOString() ?? null,
+      at: new Date().toISOString(),
+    });
     void this.notifyDriver(offer).catch((error: unknown) =>
       this.logger.error(
         `Failed to notify driver of offer: ${error instanceof Error ? error.message : 'unknown'}`,
@@ -395,6 +433,11 @@ export class OffersService {
         reason: 'Superseded by manual assignment',
       },
     });
+    await this.setWaitingStatus(
+      orderId,
+      STATUS_ORDERS.ASSIGNING_DRIVER,
+      STATUS_ORDERS.REQUESTED,
+    );
 
     const assignment = await this.assignments.create(user, {
       orderId,
@@ -430,7 +473,89 @@ export class OffersService {
     return assignment;
   }
 
+  // ── Payment hook ───────────────────────────────────────────────────────────
+
+  /**
+   * An order just became paid and dispatchable. Tells whoever watches it,
+   * and in automatic mode offers it right away instead of waiting for the
+   * next sweep. Called after the payment commits (see DispatchTriggerService),
+   * so it re-reads the order rather than trusting the caller.
+   */
+  async onOrderDispatchable(orderId: string): Promise<void> {
+    const order = await this.prisma.transportOrder.findUnique({
+      where: { id: orderId },
+      select: { status: true, paymentStatus: true },
+    });
+    if (
+      !order ||
+      order.status !== STATUS_ORDERS.REQUESTED ||
+      !DISPATCHABLE_PAYMENT_STATUSES.includes(order.paymentStatus)
+    ) {
+      return;
+    }
+
+    this.realtime.emitOrderStatusChanged({
+      orderId,
+      status: order.status,
+      changedAt: new Date().toISOString(),
+    });
+    if (this.autoEnabled) {
+      this.realtime.emitMatchingStatus({
+        orderId,
+        state: 'SEARCHING',
+        attempt: 0,
+        at: new Date().toISOString(),
+      });
+      await this.offerNext(orderId);
+    }
+  }
+
   // ── Internals ──────────────────────────────────────────────────────────────
+
+  /**
+   * Whether the order can take a new automatic offer: paid, still without a
+   * driver, and no offer open. offerNext is reached from timers and events,
+   * so it cannot assume the order is still where it was.
+   */
+  private async isWaitingForOffer(orderId: string): Promise<boolean> {
+    const order = await this.prisma.transportOrder.findFirst({
+      where: {
+        id: orderId,
+        status: { in: DISPATCH_WAITING_STATUSES },
+        paymentStatus: { in: DISPATCHABLE_PAYMENT_STATUSES },
+        orderAssignments: {
+          none: {
+            assignmentStatus: {
+              in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+            },
+          },
+        },
+        driverOffers: { none: { status: OFFER_STATUS.PENDING } },
+      },
+      select: { id: true },
+    });
+    return order !== null;
+  }
+
+  /** Compare-and-set between REQUESTED and ASSIGNING_DRIVER, announced. */
+  private async setWaitingStatus(
+    orderId: string,
+    from: STATUS_ORDERS,
+    to: STATUS_ORDERS,
+  ): Promise<void> {
+    const moved = await this.prisma.transportOrder.updateMany({
+      where: { id: orderId, status: from },
+      data: { status: to },
+    });
+    if (moved.count === 1) {
+      this.realtime.emitOrderStatusChanged({
+        orderId,
+        status: to,
+        previousStatus: from,
+        changedAt: new Date().toISOString(),
+      });
+    }
+  }
 
   private async rankingForManualPick(
     orderId: string,
@@ -466,7 +591,7 @@ export class OffersService {
     const stale = await this.prisma.driverOffer.findMany({
       where: {
         status: OFFER_STATUS.PENDING,
-        order: { status: { not: STATUS_ORDERS.REQUESTED } },
+        order: { status: { notIn: DISPATCH_WAITING_STATUSES } },
       },
       take: 100,
     });

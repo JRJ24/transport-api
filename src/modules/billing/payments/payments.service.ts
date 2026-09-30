@@ -7,6 +7,7 @@ import {
   Inject,
   Injectable,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import type {
@@ -28,6 +29,7 @@ import {
   TYPE_CUSTOMER,
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import { DispatchTriggerService } from '@/modules/operations/offers/dispatch-trigger.service';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { paymentConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
@@ -128,6 +130,7 @@ export class PaymentsService {
     private readonly cardnetGateway: CardnetGateway,
     @Inject(paymentConfig.KEY)
     private readonly paymentsConfig: ConfigType<typeof paymentConfig>,
+    @Optional() private readonly dispatchTrigger?: DispatchTriggerService,
   ) {}
 
   list(): Promise<Payment[]> {
@@ -977,9 +980,10 @@ export class PaymentsService {
     const hasAuthorizedManual = order.payments.some((candidate) =>
       this.isDispatchAuthorizedPayment(candidate),
     );
-    const hasProcessing = order.payments.some((candidate) =>
-      candidate.status === PAYMENT_STATUS.PENDING ||
-      candidate.status === PAYMENT_STATUS.PROCESSING,
+    const hasProcessing = order.payments.some(
+      (candidate) =>
+        candidate.status === PAYMENT_STATUS.PENDING ||
+        candidate.status === PAYMENT_STATUS.PROCESSING,
     );
     const nextPaymentStatus = covered
       ? hasAuthorizedManual
@@ -989,16 +993,21 @@ export class PaymentsService {
         ? PAYMENT_STATUS.PROCESSING
         : PAYMENT_STATUS.PENDING;
 
+    const becomesDispatchable =
+      covered && ORDER_STATUSES_AWAITING_PAYMENT.has(order.status);
+
     await tx.transportOrder.update({
       where: { id: payment.orderId },
       data: {
         paymentStatus: nextPaymentStatus,
-        ...(covered &&
-          ORDER_STATUSES_AWAITING_PAYMENT.has(order.status) && {
-            status: STATUS_ORDERS.REQUESTED,
-          }),
+        ...(becomesDispatchable && { status: STATUS_ORDERS.REQUESTED }),
       },
     });
+
+    // Paid: look for a driver now instead of waiting for someone to notice.
+    if (becomesDispatchable) {
+      this.dispatchTrigger?.orderMaybeDispatchable(payment.orderId);
+    }
   }
 
   private isDispatchAuthorizedPayment(

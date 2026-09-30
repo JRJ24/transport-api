@@ -1,8 +1,14 @@
 import { BullModule } from '@nestjs/bullmq';
-import { Module, type DynamicModule, type Provider } from '@nestjs/common';
+import {
+  Global,
+  Module,
+  type DynamicModule,
+  type Provider,
+} from '@nestjs/common';
 import { NotificationsModule } from '@/modules/support/notifications/notifications.module';
 import { AssignmentsModule } from '../assignments/assignments.module';
 import { MatchingModule } from '../matching/matching.module';
+import { DispatchTriggerService } from './dispatch-trigger.service';
 import { OfferProcessor } from './offer.processor';
 import { MATCHING_QUEUE, MATCHING_QUEUE_ENABLED } from './offer.queue';
 import { OfferSchedulerService } from './offer-scheduler.service';
@@ -18,6 +24,8 @@ const queueProviders: Provider[] = MATCHING_QUEUE_ENABLED
   ? [OfferProcessor]
   : [];
 
+/** Global so billing can reach DispatchTriggerService without importing matching. */
+@Global()
 @Module({
   imports: [
     NotificationsModule,
@@ -26,7 +34,12 @@ const queueProviders: Provider[] = MATCHING_QUEUE_ENABLED
     ...queueImports,
   ],
   controllers: [OffersController],
-  providers: [OffersService, OfferSchedulerService, ...queueProviders],
-  exports: [OffersService],
+  providers: [
+    OffersService,
+    OfferSchedulerService,
+    DispatchTriggerService,
+    ...queueProviders,
+  ],
+  exports: [OffersService, DispatchTriggerService],
 })
 export class OffersModule {}
