@@ -2,10 +2,13 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Type } from 'class-transformer';
 import {
   IsDate,
+  IsInt,
   IsOptional,
   IsString,
   IsUUID,
+  Max,
   MaxLength,
+  Min,
 } from 'class-validator';
 
 export class AuditQueryDto {
@@ -49,4 +52,12 @@ export class AuditQueryDto {
   @Type(() => Date)
   @IsDate()
   to?: Date;
+
+  @ApiPropertyOptional({ default: 200, maximum: 1000 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  @Max(1000)
+  limit?: number;
 }

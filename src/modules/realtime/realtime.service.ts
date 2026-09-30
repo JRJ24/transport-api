@@ -4,6 +4,7 @@ import {
   Logger,
   OnModuleDestroy,
   OnModuleInit,
+  Optional,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import { HttpAdapterHost } from '@nestjs/core';
@@ -23,6 +24,7 @@ import {
   type PresenceInput,
   type PresenceResult,
 } from '@/modules/operations/presence/presence.service';
+import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
 interface TrackingLocationPayload {
   driverId?: string;
@@ -52,6 +54,7 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     private readonly auth: ConfigType<typeof authConfig>,
     @Inject(matchingConfig.KEY)
     private readonly matching: ConfigType<typeof matchingConfig>,
+    @Optional() private readonly settings?: RuntimeSettingsService,
   ) {}
 
   onModuleInit(): void {
@@ -143,7 +146,10 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     this.io?.to('tracking:operations').emit('order.created', payload);
     // With automatic offers on, drivers hear about an order only through an
     // offer made to them, never through a broadcast they could race on.
-    if (this.matching.autoOffer !== 'on') {
+    const auto =
+      this.settings?.get('matching.auto_offer') ??
+      this.matching.autoOffer === 'on';
+    if (!auto) {
       this.io?.to('drivers:requests').emit('order.created', payload);
     }
   }

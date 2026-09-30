@@ -47,10 +47,11 @@ export class DeliveryProofsController {
   @Roles(ROLES.ADMIN, ROLES.OPERATOR)
   @Patch(':id/validate')
   validate(
+    @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: ValidateDeliveryProofDto,
   ): Promise<DeliveryProof> {
-    return this.service.validate(id, dto);
+    return this.service.validate(id, dto, user.id);
   }
 
   @ApiOperation({ summary: 'Add signature to delivery proof' })

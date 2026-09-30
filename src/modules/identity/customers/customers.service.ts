@@ -190,8 +190,10 @@ export class CustomersService {
       });
     }
 
+    // The operator can hand the customer a temporary password; otherwise the
+    // account is created unusable until a reset.
     const passwordHash = await hashPassword(
-      randomBytes(24).toString('base64url'),
+      dto.password ?? randomBytes(24).toString('base64url'),
       this.auth.bcryptSaltRounds,
     );
 

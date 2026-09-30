@@ -4,6 +4,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import {
@@ -48,6 +49,7 @@ import {
   scoreCandidate,
   type ScoreWeights,
 } from './scoring';
+import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
 /** SystemParameter key holding the JSON weights, e.g. {"eta":0.55,...}. */
 export const WEIGHTS_PARAMETER_KEY = 'matching.score.weights';
@@ -102,6 +104,7 @@ export class MatchingService {
     private readonly realtime: RealtimeService,
     @Inject(matchingConfig.KEY)
     private readonly config: ConfigType<typeof matchingConfig>,
+    @Optional() private readonly settings?: RuntimeSettingsService,
   ) {}
 
   async rankForOrder(
@@ -138,7 +141,9 @@ export class MatchingService {
 
     // Grow the search one ring at a time and stop as soon as there are enough
     // eligible drivers: the Matrix call is billed per origin.
-    for (let ring = 0; ring <= this.config.maxRings; ring += 1) {
+    const maxRings =
+      this.settings?.get('matching.max_rings') ?? this.config.maxRings;
+    for (let ring = 0; ring <= maxRings; ring += 1) {
       result.ringsSearched = ring;
       const members = await this.presence.membersOfCells(
         h3Ring(pickupCell, ring),
@@ -270,6 +275,10 @@ export class MatchingService {
 
   /** Current weights: SystemParameter override, else the spec defaults. */
   async weights(): Promise<ScoreWeights> {
+    // Configuración edits land here within seconds, no cache to wait out.
+    if (this.settings) {
+      return normalizeWeights(this.settings.get('matching.score.weights'));
+    }
     if (this.weightsCache && this.weightsCache.expiresAt > Date.now()) {
       return this.weightsCache.value;
     }

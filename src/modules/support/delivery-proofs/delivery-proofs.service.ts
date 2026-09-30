@@ -1,10 +1,14 @@
-import { ForbiddenException, Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import type {
   DeliveryProof,
   Prisma,
   Signature,
 } from '@generated/prisma/client';
-import { ROLES, VALIDATION } from '@generated/prisma/enums';
+import { ROLES, STOP_TYPE, VALIDATION } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
@@ -13,11 +17,18 @@ import type { CreateDeliveryProofDto } from './dto/create-delivery-proof.dto';
 import type { CreateSignatureDto } from './dto/create-signature.dto';
 import type { ValidateDeliveryProofDto } from './dto/validate-delivery-proof.dto';
 
+/** Attachment.entityType values the apps write for delivery proof photos. */
+const PROOF_ENTITY_TYPES = [
+  'DeliveryProof',
+  'DELIVERY_PROOF',
+  'delivery_proof',
+];
+
 @Injectable()
 export class DeliveryProofsService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(query: DeliveryProofQueryDto): Promise<DeliveryProof[]> {
+  async list(query: DeliveryProofQueryDto): Promise<DeliveryProof[]> {
     const where: Prisma.DeliveryProofWhereInput = {
       ...(query.orderId && { orderId: query.orderId }),
       ...(query.proofType && { proofType: query.proofType }),
@@ -46,15 +57,53 @@ export class DeliveryProofsService {
       ];
     }
 
-    return this.prisma.deliveryProof.findMany({
+    const proofs = await this.prisma.deliveryProof.findMany({
       where,
       include: {
         signatures: true,
-        order: { select: { id: true, orderCode: true, status: true } },
+        order: {
+          select: {
+            id: true,
+            orderCode: true,
+            status: true,
+            // The delivery stop, to compare against where the proof was taken.
+            orderStops: {
+              where: { stopType: STOP_TYPE.DROPOFF },
+              orderBy: { sequence: 'desc' },
+              take: 1,
+              select: { addressLine: true, latitude: true, longitude: true },
+            },
+          },
+        },
         driver: { select: { id: true, fullName: true, email: true } },
       },
       orderBy: { capturedAt: 'desc' },
     });
+
+    // Photos are Attachments linked by entity, not a relation: one query for
+    // the whole page instead of one per proof.
+    const attachments = proofs.length
+      ? await this.prisma.attachment.findMany({
+          where: {
+            entityType: { in: PROOF_ENTITY_TYPES },
+            entityId: { in: proofs.map((proof) => proof.id) },
+          },
+          select: {
+            id: true,
+            entityId: true,
+            fileName: true,
+            fileUrl: true,
+            mimeType: true,
+            createdAt: true,
+          },
+          orderBy: { createdAt: 'asc' },
+        })
+      : [];
+
+    return proofs.map((proof) => ({
+      ...proof,
+      attachments: attachments.filter((file) => file.entityId === proof.id),
+    }));
   }
 
   create(
@@ -86,11 +135,53 @@ export class DeliveryProofsService {
     });
   }
 
-  validate(id: string, dto: ValidateDeliveryProofDto): Promise<DeliveryProof> {
-    return this.prisma.deliveryProof.update({
+  async validate(
+    id: string,
+    dto: ValidateDeliveryProofDto,
+    actorUserId?: string,
+  ): Promise<DeliveryProof> {
+    const current = await this.prisma.deliveryProof.findUnique({
       where: { id },
-      data: { validationStatus: dto.validationStatus, validatedAt: new Date() },
+      select: { validationStatus: true, notes: true },
     });
+    if (!current) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Delivery proof not found',
+      });
+    }
+    const reason = dto.reason?.trim();
+    const updated = await this.prisma.deliveryProof.update({
+      where: { id },
+      data: {
+        validationStatus: dto.validationStatus,
+        validatedAt: new Date(),
+        ...(reason && {
+          notes: [current.notes, `[Revisión] ${reason}`]
+            .filter(Boolean)
+            .join('\n'),
+        }),
+      },
+    });
+    if (actorUserId) {
+      await this.prisma.auditLog.create({
+        data: {
+          actorUserId,
+          action: 'DELIVERY_PROOF_REVIEWED',
+          entityType: 'DeliveryProof',
+          entityId: id,
+          oldValues: { validationStatus: current.validationStatus },
+          newValues: {
+            validationStatus: dto.validationStatus,
+            ...(reason && { reason }),
+          },
+          ipAddress: null,
+          userAgent: null,
+          createdAt: new Date(),
+        },
+      });
+    }
+    return updated;
   }
 
   async addSignature(
@@ -125,7 +216,9 @@ export class DeliveryProofsService {
     user: AuthenticatedUser,
     orderId: string,
   ): Promise<void> {
-    if (user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)) {
+    if (
+      user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
+    ) {
       return;
     }
 

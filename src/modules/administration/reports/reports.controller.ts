@@ -20,6 +20,14 @@ export class ReportsController {
     return this.service.operations(query);
   }
 
+  @ApiOperation({
+    summary: 'Management summary: KPIs, daily series, top drivers',
+  })
+  @Get('summary')
+  summary(@Query() query: ReportQueryDto) {
+    return this.service.summary(query);
+  }
+
   @ApiOperation({ summary: 'Get billing report' })
   @Get('billing')
   billing(@Query() query: ReportQueryDto) {
@@ -29,7 +37,7 @@ export class ReportsController {
   @ApiOperation({ summary: 'Export operations or billing report' })
   @Get(':type/export')
   async export(
-    @Param('type') type: 'operations' | 'billing',
+    @Param('type') type: 'operations' | 'billing' | 'summary',
     @Query() query: ReportExportQueryDto,
     @Res({ passthrough: true }) response: Response,
   ): Promise<Buffer> {

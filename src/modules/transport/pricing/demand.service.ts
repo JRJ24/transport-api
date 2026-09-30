@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import { cellToChildren } from 'h3-js';
 import {
@@ -20,6 +20,7 @@ import {
   resolveBandIndex,
   smoothRatio,
 } from './demand-bands';
+import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
 /** SystemParameter key for JSON bands, e.g. [{"above":1,"multiplier":1.1,"label":"MODERADO"}]. */
 export const DEMAND_BANDS_PARAMETER_KEY = 'pricing.demand.bands';
@@ -84,10 +85,12 @@ export class DemandService {
     private readonly config: ConfigType<typeof demandConfig>,
     @Inject(matchingConfig.KEY)
     private readonly matching: ConfigType<typeof matchingConfig>,
+    @Optional() private readonly settings?: RuntimeSettingsService,
   ) {}
 
+  /** Editable from Configuración; the env value is the default. */
   get mode(): 'off' | 'shadow' | 'on' {
-    return this.config.mode;
+    return this.settings?.get('pricing.demand.mode') ?? this.config.mode;
   }
 
   /**
@@ -102,7 +105,7 @@ export class DemandService {
   ): Promise<Map<string, DemandSnapshot>> {
     const result = new Map<string, DemandSnapshot>();
     if (
-      this.config.mode === 'off' ||
+      this.mode === 'off' ||
       !this.redis.client ||
       vehicleCategoryIds.length === 0
     ) {
@@ -192,7 +195,7 @@ export class DemandService {
     );
 
     return {
-      mode: this.config.mode,
+      mode: this.mode,
       h3Cell: cell,
       h3Resolution: this.config.h3Resolution,
       vehicleCategoryId: categoryId,
@@ -203,7 +206,7 @@ export class DemandService {
       smoothedRatio: round3(smoothedRatio),
       band: band.label,
       computedMultiplier,
-      appliedMultiplier: this.config.mode === 'on' ? computedMultiplier : 1,
+      appliedMultiplier: this.mode === 'on' ? computedMultiplier : 1,
       belowMinObservations,
       noSupply: availableDrivers === 0,
       computedAt: now.toISOString(),
@@ -320,6 +323,9 @@ export class DemandService {
   }
 
   private async bands(): Promise<DemandBand[]> {
+    if (this.settings) {
+      return normalizeBands(this.settings.get('pricing.demand.bands'));
+    }
     if (this.bandsCache && this.bandsCache.expiresAt > Date.now()) {
       return this.bandsCache.value;
     }

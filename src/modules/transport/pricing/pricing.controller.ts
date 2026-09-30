@@ -1,7 +1,10 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -21,6 +24,7 @@ import { PreviewManualQuoteDto } from './dto/manual-quote.dto';
 import { QuoteOptionsDto } from './dto/quote-options.dto';
 import { RateCardQueryDto } from './dto/rate-card-query.dto';
 import { UpdateRateCardDto } from './dto/update-rate-card.dto';
+import { UpdateRateRuleDto } from './dto/update-rate-rule.dto';
 import { Throttle } from '@nestjs/throttler';
 import {
   PricingService,
@@ -56,6 +60,37 @@ export class PricingController {
     @Body() dto: UpdateRateCardDto,
   ): Promise<RateCard> {
     return this.service.updateRateCard(id, dto);
+  }
+
+  @ApiOperation({ summary: 'Deactivate a rate card (never deleted)' })
+  @Roles(ROLES.ADMIN)
+  @Delete('rate-cards/:id')
+  deactivateRateCard(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<RateCard> {
+    return this.service.deactivateRateCard(id);
+  }
+
+  @ApiOperation({ summary: 'Update the prices of a rate rule' })
+  @Roles(ROLES.ADMIN)
+  @Patch('rate-cards/:id/rules/:ruleId')
+  updateRateRule(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('ruleId', ParseUUIDPipe) ruleId: string,
+    @Body() dto: UpdateRateRuleDto,
+  ): Promise<RateRule> {
+    return this.service.updateRateRule(id, ruleId, dto);
+  }
+
+  @ApiOperation({ summary: 'Delete a rate rule' })
+  @Roles(ROLES.ADMIN)
+  @Delete('rate-cards/:id/rules/:ruleId')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  deleteRateRule(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Param('ruleId', ParseUUIDPipe) ruleId: string,
+  ): Promise<void> {
+    return this.service.deleteRateRule(id, ruleId);
   }
 
   @ApiOperation({ summary: 'List rate rules for a rate card' })
