@@ -1,10 +1,20 @@
-import { ForbiddenException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
 import type {
   Incident,
   IncidentComment,
   Prisma,
 } from '@generated/prisma/client';
-import { INCIDENT_STATUS, ROLES } from '@generated/prisma/enums';
+import {
+  INCIDENT_SEVERITY,
+  INCIDENT_STATUS,
+  ROLES,
+} from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
@@ -133,6 +143,75 @@ export class IncidentsService {
     return incident;
   }
 
+  /**
+   * Escalating raises the severity one level, puts the incident in review
+   * and leaves a trace in its comments; operators are notified as for any
+   * incident update.
+   */
+  async escalate(
+    user: AuthenticatedUser,
+    id: string,
+    reason?: string,
+  ): Promise<Incident> {
+    const current = await this.prisma.incident.findUnique({
+      where: { id },
+      select: { severity: true, status: true },
+    });
+    if (!current) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Incident not found',
+      });
+    }
+    if (
+      current.status === INCIDENT_STATUS.RESOLVED ||
+      current.status === INCIDENT_STATUS.CLOSED
+    ) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'A resolved or closed incident cannot be escalated',
+      });
+    }
+    const ladder = [
+      INCIDENT_SEVERITY.LOW,
+      INCIDENT_SEVERITY.MEDIUM,
+      INCIDENT_SEVERITY.HIGH,
+      INCIDENT_SEVERITY.CRITICAL,
+    ];
+    const next =
+      ladder[Math.min(ladder.indexOf(current.severity) + 1, ladder.length - 1)];
+
+    const incident = await this.prisma.$transaction(async (tx) => {
+      const updated = await tx.incident.update({
+        where: { id },
+        data: { severity: next, status: INCIDENT_STATUS.IN_REVIEW },
+      });
+      await tx.incidentComment.create({
+        data: {
+          incidentId: id,
+          userId: user.id,
+          comment: `Escalada a severidad ${next}${reason?.trim() ? `: ${reason.trim()}` : ''}`,
+        },
+      });
+      return updated;
+    });
+
+    this.realtime.emitIncidentUpdated({
+      incidentId: incident.id,
+      orderId: incident.orderId,
+      status: incident.status,
+      severity: incident.severity,
+      updatedAt: new Date().toISOString(),
+    });
+    void this.notifyOperators('INCIDENT_UPDATED', incident).catch(
+      (error: unknown) =>
+        this.logger.error(
+          `Failed to notify operators about escalation: ${error instanceof Error ? error.message : 'unknown'}`,
+        ),
+    );
+    return incident;
+  }
+
   addComment(
     user: AuthenticatedUser,
     incidentId: string,
@@ -151,7 +230,9 @@ export class IncidentsService {
     user: AuthenticatedUser,
     orderId: string,
   ): Promise<void> {
-    if (user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)) {
+    if (
+      user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
+    ) {
       return;
     }
 

@@ -30,11 +30,16 @@ export class ParametersService {
     });
   }
 
-  upsert(
+  async upsert(
     user: AuthenticatedUser,
     dto: UpsertParameterDto,
   ): Promise<SystemParameter> {
-    return this.prisma.systemParameter.upsert({
+    const key = dto.key.trim();
+    const previous = await this.prisma.systemParameter.findUnique({
+      where: { key },
+      select: { value: true },
+    });
+    const saved = await this.prisma.systemParameter.upsert({
       where: { key: dto.key.trim() },
       update: {
         value: dto.value,
@@ -50,5 +55,19 @@ export class ParametersService {
         updatedBy: user.id,
       },
     });
+    await this.prisma.auditLog.create({
+      data: {
+        actorUserId: user.id,
+        action: 'SYSTEM_PARAMETER_UPDATED',
+        entityType: 'SYSTEM_PARAMETER',
+        entityId: key,
+        oldValues: previous ? { key, value: previous.value } : undefined,
+        newValues: { key, value: dto.value },
+        ipAddress: null,
+        userAgent: null,
+        createdAt: new Date(),
+      },
+    });
+    return saved;
   }
 }

@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -21,8 +22,10 @@ import type { CreateRateCardDto } from './dto/create-rate-card.dto';
 import type { CreateRateRuleDto } from './dto/create-rate-rule.dto';
 import type { RateCardQueryDto } from './dto/rate-card-query.dto';
 import type { UpdateRateCardDto } from './dto/update-rate-card.dto';
+import type { UpdateRateRuleDto } from './dto/update-rate-rule.dto';
 import { DemandService, type DemandSnapshot } from './demand.service';
 import { computeFare } from './fare';
+import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
 const TAX_RATE = 0.18;
 const QUOTE_TTL_MS = 15 * 60_000;
@@ -111,7 +114,13 @@ export class PricingService {
   constructor(
     private readonly prisma: PrismaService,
     @Optional() private readonly demand?: DemandService,
+    @Optional() private readonly settings?: RuntimeSettingsService,
   ) {}
+
+  /** ITBIS for new quotes; editable from Configuración. */
+  private get taxRate(): number {
+    return this.settings?.get('tax.rate') ?? TAX_RATE;
+  }
 
   /** Demand per category at the pickup; empty when unknown or disabled. */
   private async demandFor(
@@ -169,6 +178,7 @@ export class PricingService {
         validForm: dto.validFrom,
         validTo: dto.validTo ?? null,
         isActive: dto.isActive ?? true,
+        priority: dto.priority ?? 0,
       },
     });
   }
@@ -184,8 +194,65 @@ export class PricingService {
         ...(dto.validFrom !== undefined && { validForm: dto.validFrom }),
         ...(dto.validTo !== undefined && { validTo: dto.validTo }),
         ...(dto.isActive !== undefined && { isActive: dto.isActive }),
+        ...(dto.priority !== undefined && { priority: dto.priority }),
       },
     });
+  }
+
+  /** Cards are never hard-deleted: quotes keep pointing at their rules. */
+  deactivateRateCard(id: string): Promise<RateCard> {
+    return this.prisma.rateCard.update({
+      where: { id },
+      data: { isActive: false },
+    });
+  }
+
+  async updateRateRule(
+    rateCardId: string,
+    ruleId: string,
+    dto: UpdateRateRuleDto,
+  ): Promise<RateRule> {
+    await this.findRuleOrThrow(rateCardId, ruleId);
+    return this.prisma.rateRule.update({
+      where: { id: ruleId },
+      data: {
+        ...(dto.baseFare !== undefined && { baseFare: dto.baseFare }),
+        ...(dto.pricePerKm !== undefined && { pricePerKM: dto.pricePerKm }),
+        ...(dto.pricePerMinute !== undefined && {
+          pricePerMinute: dto.pricePerMinute,
+        }),
+        ...(dto.minimumFare !== undefined && { minimumFare: dto.minimumFare }),
+        ...(dto.helperFee !== undefined && { helperFee: dto.helperFee }),
+        ...(dto.nightFee !== undefined && { nightFee: dto.nightFee }),
+        ...(dto.waitingPricePerMinute !== undefined && {
+          waitingPricePerMinute: dto.waitingPricePerMinute,
+        }),
+        ...(dto.cancellationFee !== undefined && {
+          cancellationFee: dto.cancellationFee,
+        }),
+      },
+    });
+  }
+
+  async deleteRateRule(rateCardId: string, ruleId: string): Promise<void> {
+    await this.findRuleOrThrow(rateCardId, ruleId);
+    await this.prisma.rateRule.delete({ where: { id: ruleId } });
+  }
+
+  private async findRuleOrThrow(
+    rateCardId: string,
+    ruleId: string,
+  ): Promise<RateRule> {
+    const rule = await this.prisma.rateRule.findFirst({
+      where: { id: ruleId, rateCardId },
+    });
+    if (!rule) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Rate rule not found in this rate card',
+      });
+    }
+    return rule;
   }
 
   listRateRules(rateCardId: string): Promise<RateRule[]> {
@@ -195,10 +262,20 @@ export class PricingService {
     });
   }
 
-  createRateRule(
+  async createRateRule(
     rateCardId: string,
     dto: CreateRateRuleDto,
   ): Promise<RateRule> {
+    const existing = await this.prisma.rateRule.count({
+      where: { rateCardId, vehicleCategoryId: dto.vehicleCategoryId },
+    });
+    if (existing > 0) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message:
+          'This rate card already has a rule for that vehicle category; edit it instead',
+      });
+    }
     return this.prisma.rateRule.create({
       data: {
         rateCardId,
@@ -243,7 +320,12 @@ export class PricingService {
     const demand = (await this.demandFor(dto, [dto.vehicleCategoryId])).get(
       dto.vehicleCategoryId,
     );
-    const amounts = priceFor(rule, dto, demand?.appliedMultiplier ?? 1);
+    const amounts = priceFor(
+      rule,
+      dto,
+      demand?.appliedMultiplier ?? 1,
+      this.taxRate,
+    );
 
     return this.prisma.priceQuote.create({
       data: {
@@ -263,7 +345,7 @@ export class PricingService {
           pricePerKm: Number(rule.pricePerKM),
           pricePerMinute: Number(rule.pricePerMinute),
           minimumFare: Number(rule.minimumFare),
-          taxRate: TAX_RATE,
+          taxRate: this.taxRate,
           distanceKm: dto.distanceKm,
           estimatedDurationMin: Math.round(dto.estimatedDurationMin),
           requireHelper: dto.requireHelper ?? false,
@@ -302,7 +384,8 @@ export class PricingService {
         vehicleCategoryId: { in: categories.map((category) => category.id) },
         rateCard: activeRateCardWhere(),
       },
-      orderBy: { createdAt: 'desc' },
+      // Same precedence as findActiveRule: priority, then newest.
+      orderBy: [{ rateCard: { priority: 'desc' } }, { createdAt: 'desc' }],
     });
 
     // findFirst + orderBy desc per category, done in memory.
@@ -342,7 +425,7 @@ export class PricingService {
         maxWeightKg,
         maxVolumenM3,
         totalAmount: rule
-          ? priceFor(rule, input, multiplier).totalAmount
+          ? priceFor(rule, input, multiplier, this.taxRate).totalAmount
           : null,
         demandMultiplier: multiplier,
         demandBand: categoryDemand?.band ?? null,
@@ -417,7 +500,7 @@ export class PricingService {
       helperFee + tollAmount + weightSurcharge + volumeSurcharge + otherCharges;
     const subtotalBeforeMinimum = routeAmount + extrasAmount - discountAmount;
     const subtotal = Math.max(minimumFare, subtotalBeforeMinimum);
-    const taxAmount = subtotal * TAX_RATE;
+    const taxAmount = subtotal * this.taxRate;
     const totalAmount = subtotal + taxAmount + manualAdjustmentAmount;
 
     const breakdown: Prisma.InputJsonObject = {
@@ -442,7 +525,7 @@ export class PricingService {
       discountAmount: roundMoney(discountAmount),
       subtotalBeforeMinimum: roundMoney(subtotalBeforeMinimum),
       subtotal: roundMoney(subtotal),
-      taxRate: TAX_RATE,
+      taxRate: this.taxRate,
       taxAmount: roundMoney(taxAmount),
       manualAdjustmentAmount: roundMoney(manualAdjustmentAmount),
       totalAmount: roundMoney(totalAmount),
@@ -515,9 +598,11 @@ export class PricingService {
   }
 
   private findActiveRule(vehicleCategoryId: string): Promise<RateRule | null> {
+    // Several active cards may price the same category: the card with the
+    // highest priority wins, then the newest rule.
     return this.prisma.rateRule.findFirst({
       where: { vehicleCategoryId, rateCard: activeRateCardWhere() },
-      orderBy: { createdAt: 'desc' },
+      orderBy: [{ rateCard: { priority: 'desc' } }, { createdAt: 'desc' }],
     });
   }
 }
@@ -550,6 +635,7 @@ export function priceFor(
     nightService?: boolean;
   },
   demandMultiplier = 1,
+  taxRate = TAX_RATE,
 ): QuoteAmounts {
   const helperFee = input.requireHelper ? Number(rule.helperFee) : 0;
   const nightFee = input.nightService ? Number(rule.nightFee) : 0;
@@ -565,7 +651,7 @@ export function priceFor(
     // Helper and night fees are charges on top of the service: the demand
     // multiplier never scales them.
     otherCharges: helperFee + nightFee,
-    taxRate: TAX_RATE,
+    taxRate,
   });
 
   return {

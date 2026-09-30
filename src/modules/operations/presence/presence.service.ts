@@ -325,6 +325,33 @@ export class PresenceService {
     return { fresh: [...fresh], stale: [...stale] };
   }
 
+  /**
+   * Every driver with a fresh position, for the operations map. SCAN walks
+   * the keyspace in chunks, so it never blocks Redis; fleets here are small.
+   */
+  async listFresh(now = new Date(), limit = 1000): Promise<PresenceRecord[]> {
+    const redis = this.redis.client;
+    if (!redis) {
+      return [];
+    }
+    const ids: string[] = [];
+    let cursor = '0';
+    do {
+      const [next, keys] = await redis.scan(
+        cursor,
+        'MATCH',
+        driverKey('*'),
+        'COUNT',
+        200,
+      );
+      cursor = next;
+      ids.push(...keys.map((key) => key.slice(driverKey('').length)));
+    } while (cursor !== '0' && ids.length < limit);
+
+    const records = await this.getMany(ids.slice(0, limit));
+    return records.filter((record) => this.isFresh(record, now));
+  }
+
   /** Number of fresh drivers across `cells`, for supply/demand ratios. */
   async countFreshInCells(cells: string[], now = new Date()): Promise<number> {
     return (await this.membersOfCells(cells, now)).fresh.length;

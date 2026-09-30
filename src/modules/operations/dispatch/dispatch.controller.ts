@@ -44,6 +44,12 @@ export class DispatchController {
     return this.service.availableDrivers(orderId);
   }
 
+  @ApiOperation({ summary: 'Available drivers with a fresh position (map)' })
+  @Get('live-drivers')
+  liveDrivers() {
+    return this.service.liveDrivers();
+  }
+
   @ApiOperation({
     summary:
       'Ranked drivers for an order (H3 proximity, road ETA) with exclusion reasons',

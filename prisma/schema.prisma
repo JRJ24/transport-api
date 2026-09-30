@@ -641,6 +641,8 @@ model RateCard {
   validForm   DateTime  @map("valid_form")
   validTo     DateTime? @map("valid_to")
   isActive    Boolean   @map("is_active")
+  /// Higher wins when several cards are active for the same category.
+  priority    Int       @default(0)
   createdAt   DateTime  @default(now())
 
   rateRules RateRule[] @relation("RATE_CARDS")

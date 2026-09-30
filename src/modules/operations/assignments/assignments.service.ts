@@ -6,6 +6,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import type { OrderAssignment, Prisma } from '@generated/prisma/client';
@@ -29,6 +30,7 @@ import { NotificationDispatcherService } from '@/modules/support/notifications/n
 import { orderStatusLabel } from '@/modules/support/notifications/templates/notification.templates';
 import { PresenceService } from '../presence/presence.service';
 import type { CreateAssignmentDto } from './dto/create-assignment.dto';
+import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -82,6 +84,7 @@ export class AssignmentsService {
     private readonly presence: PresenceService,
     @Inject(matchingConfig.KEY)
     private readonly matching: ConfigType<typeof matchingConfig>,
+    @Optional() private readonly settings?: RuntimeSettingsService,
   ) {}
 
   /**
@@ -89,7 +92,10 @@ export class AssignmentsService {
    * off while automatic offers are on.
    */
   get selfDispatchEnabled(): boolean {
-    return this.matching.autoOffer !== 'on';
+    const auto =
+      this.settings?.get('matching.auto_offer') ??
+      this.matching.autoOffer === 'on';
+    return !auto;
   }
 
   /**

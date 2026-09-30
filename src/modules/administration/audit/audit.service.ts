@@ -10,7 +10,10 @@ export class AuditService {
   list(query: AuditQueryDto): Promise<AuditLog[]> {
     const where: Prisma.AuditLogWhereInput = {
       ...(query.actorUserId && { actorUserId: query.actorUserId }),
-      ...(query.entityType && { entityType: query.entityType }),
+      // Entities were written with mixed casing (USER, User, DeliveryProof).
+      ...(query.entityType && {
+        entityType: { equals: query.entityType, mode: 'insensitive' },
+      }),
       ...(query.entityId && { entityId: query.entityId }),
       ...(query.action && {
         action: { contains: query.action, mode: 'insensitive' },
@@ -37,7 +40,7 @@ export class AuditService {
       where,
       include: { user: { select: { id: true, fullName: true, email: true } } },
       orderBy: { createdAt: 'desc' },
-      take: 200,
+      take: Math.min(Math.max(query.limit ?? 200, 1), 1000),
     });
   }
 }

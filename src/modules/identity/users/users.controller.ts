@@ -64,6 +64,16 @@ export class UsersController {
     return toUserResponse(await this.usersService.getByIdWithRoles(id));
   }
 
+  @ApiOperation({ summary: 'Update a user name or phone (TMS)' })
+  @Roles(ROLES.ADMIN)
+  @Patch(':id')
+  async updateOne(
+    @Param('id') id: string,
+    @Body() dto: UpdateProfileDto,
+  ): Promise<UserResponse> {
+    return toUserResponse(await this.usersService.updateProfile(id, dto));
+  }
+
   @ApiOperation({ summary: 'Update a user account status' })
   @Roles(ROLES.ADMIN)
   @Patch(':id/status')

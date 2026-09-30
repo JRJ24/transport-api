@@ -3,9 +3,12 @@ import { Type } from 'class-transformer';
 import {
   IsBoolean,
   IsDate,
+  IsInt,
   IsOptional,
   IsString,
   Length,
+  Max,
+  Min,
 } from 'class-validator';
 
 export class CreateRateCardDto {
@@ -34,4 +37,16 @@ export class CreateRateCardDto {
   @IsOptional()
   @IsBoolean()
   isActive?: boolean;
+
+  @ApiPropertyOptional({
+    default: 0,
+    description:
+      'Higher wins when several active cards price the same category',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  @Max(1000)
+  priority?: number;
 }

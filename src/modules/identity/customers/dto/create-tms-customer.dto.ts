@@ -6,7 +6,9 @@ import {
   IsOptional,
   IsString,
   Length,
+  Matches,
   MaxLength,
+  MinLength,
 } from 'class-validator';
 import { DOCUMENT_TYPE, TYPE_CUSTOMER } from '@generated/prisma/enums';
 
@@ -68,4 +70,17 @@ export class CreateTmsCustomerDto {
   @IsEmail()
   @MaxLength(160)
   billingEmail?: string;
+
+  @ApiPropertyOptional({
+    description:
+      'Temporary password handed to the customer. Without it the account gets a random one and needs a reset.',
+  })
+  @IsOptional()
+  @IsString()
+  @MinLength(8)
+  @MaxLength(128)
+  @Matches(/^(?=.*[A-Za-z])(?=.*\d).+$/, {
+    message: 'password must contain letters and numbers',
+  })
+  password?: string;
 }

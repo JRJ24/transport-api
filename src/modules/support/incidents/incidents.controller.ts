@@ -53,6 +53,17 @@ export class IncidentsController {
     return this.service.updateStatus(id, dto);
   }
 
+  @ApiOperation({ summary: 'Escalate an incident (raises severity one level)' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
+  @Patch(':id/escalate')
+  escalate(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: { reason?: string },
+  ): Promise<Incident> {
+    return this.service.escalate(user, id, body?.reason);
+  }
+
   @ApiOperation({ summary: 'Add incident comment' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Post(':id/comments')

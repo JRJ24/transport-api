@@ -12,6 +12,7 @@ import { PrismaService } from '@/database/prisma.service';
 import { MatchingService } from '../matching/matching.service';
 import type { MatchingResult } from '../matching/matching.types';
 import { OffersService } from '../offers/offers.service';
+import { PresenceService } from '../presence/presence.service';
 import type {
   AssignCandidateDto,
   DispatchOrderDto,
@@ -33,6 +34,7 @@ export class DispatchService {
     private readonly prisma: PrismaService,
     private readonly matching: MatchingService,
     private readonly offersService: OffersService,
+    private readonly presence: PresenceService,
   ) {}
 
   pendingOrders() {
@@ -80,6 +82,30 @@ export class DispatchService {
       include: { user: { select: SAFE_USER_SELECT } },
       orderBy: { ratingAVG: 'desc' },
     });
+  }
+
+  /** Available drivers with a fresh H3 position, for the live map. */
+  async liveDrivers() {
+    const presence = await this.presence.listFresh();
+    if (presence.length === 0) {
+      return [];
+    }
+    const drivers = await this.prisma.driverProfile.findMany({
+      where: { id: { in: presence.map((record) => record.driverId) } },
+      select: { id: true, user: { select: { fullName: true } } },
+    });
+    const names = new Map(drivers.map((d) => [d.id, d.user?.fullName ?? null]));
+    return presence.map((record) => ({
+      driverId: record.driverId,
+      driverName: names.get(record.driverId) ?? null,
+      latitude: record.latitude,
+      longitude: record.longitude,
+      accuracyM: record.accuracyM,
+      heading: record.heading,
+      h3Cell: record.h3Cell,
+      status: record.status,
+      observedAt: record.observedAt.toISOString(),
+    }));
   }
 
   /** Same ranking the automatic cascade uses, plus why others are out. */

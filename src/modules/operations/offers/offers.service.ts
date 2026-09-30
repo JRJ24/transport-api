@@ -5,6 +5,7 @@ import {
   Injectable,
   Logger,
   NotFoundException,
+  Optional,
 } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
 import type {
@@ -35,6 +36,7 @@ import type {
   RankedCandidate,
 } from '../matching/matching.types';
 import { OfferSchedulerService } from './offer-scheduler.service';
+import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
 const DISPATCHABLE_PAYMENT_STATUSES: PAYMENT_STATUS[] = [
   PAYMENT_STATUS.PAID,
@@ -72,10 +74,21 @@ export class OffersService {
     private readonly scheduler: OfferSchedulerService,
     @Inject(matchingConfig.KEY)
     private readonly config: ConfigType<typeof matchingConfig>,
+    @Optional() private readonly settings?: RuntimeSettingsService,
   ) {}
 
+  /** Editable from Configuración; the env value is the default. */
   get autoEnabled(): boolean {
-    return this.config.autoOffer === 'on' && this.redis.isEnabled;
+    const on =
+      this.settings?.get('matching.auto_offer') ??
+      this.config.autoOffer === 'on';
+    return on && this.redis.isEnabled;
+  }
+
+  private get offerTtlSec(): number {
+    return (
+      this.settings?.get('matching.offer_ttl_sec') ?? this.config.offerTtlSec
+    );
   }
 
   listForOrder(orderId: string): Promise<DriverOffer[]> {
@@ -213,7 +226,7 @@ export class OffersService {
       return null;
     }
 
-    const expiresAt = new Date(Date.now() + this.config.offerTtlSec * 1000);
+    const expiresAt = new Date(Date.now() + this.offerTtlSec * 1000);
     let offer: DriverOffer;
     try {
       offer = await this.prisma.driverOffer.create({
@@ -239,7 +252,7 @@ export class OffersService {
       throw error;
     }
 
-    await this.scheduler.scheduleExpiry(offer.id, this.config.offerTtlSec);
+    await this.scheduler.scheduleExpiry(offer.id, this.offerTtlSec);
     await this.setWaitingStatus(
       orderId,
       STATUS_ORDERS.REQUESTED,
