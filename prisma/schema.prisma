@@ -380,6 +380,7 @@ model User {
   email        String         @unique
   phone        String         @unique
   passwordHash String         @map("password_hash")
+  avatarUrl    String?        @map("avatar_url")
   status       STATUS_ACCOUNT @default(ACTIVE)
   lastLoginAt  DateTime?      @map("last_login_at")
   createdAt    DateTime       @default(now()) @map("created_at")
@@ -398,6 +399,8 @@ model User {
   deviceTokens      DeviceToken[]     @relation("DEVICE_TOKENS_USERS")
   auditLogs         AuditLog[]        @relation("AUDIT_USERS")
   systemParameters  SystemParameter[] @relation("UPDATED_USER")
+  notificationPreferences NotificationPreference[] @relation("USER_NOTIFICATION_PREFERENCES")
+  emailChangeRequests     EmailChangeRequest[]     @relation("USER_EMAIL_CHANGES")
 
   @@index([email])
   @@index([phone])
@@ -1116,6 +1119,41 @@ model Refund {
   @@index([paymentId])
   @@map("refunds")
   @@schema("PAIDS")
+}
+
+/// Per-user switch for push delivery of one notification category. A missing
+/// row means "on". Critical categories ignore it (see NotificationPreferencesService).
+model NotificationPreference {
+  id        String            @id @default(uuid())
+  userId    String            @map("user_id")
+  category  NOTIFICATION_TYPE
+  push      Boolean           @default(true)
+  email     Boolean           @default(true)
+  updatedAt DateTime          @updatedAt @map("updated_at")
+
+  user User @relation("USER_NOTIFICATION_PREFERENCES", fields: [userId], references: [id])
+
+  @@unique([userId, category])
+  @@map("notification_preferences")
+  @@schema("NOTIFICATIONS")
+}
+
+/// A pending email change, confirmed with a code sent to the new address.
+model EmailChangeRequest {
+  id          String    @id @default(uuid())
+  userId      String    @map("user_id")
+  newEmail    String    @map("new_email")
+  codeHash    String    @map("code_hash")
+  attempts    Int       @default(0)
+  expiresAt   DateTime  @map("expires_at")
+  consumedAt  DateTime? @map("consumed_at")
+  createdAt   DateTime  @default(now()) @map("created_at")
+
+  user User @relation("USER_EMAIL_CHANGES", fields: [userId], references: [id])
+
+  @@index([userId, createdAt])
+  @@map("email_change_requests")
+  @@schema("AUTH")
 }
 
 model Notification {

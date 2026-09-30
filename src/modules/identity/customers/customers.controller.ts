@@ -16,6 +16,7 @@ import { ROLES } from '@generated/prisma/enums';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
+import { PaginationQueryDto } from '@/common/dto/pagination-query.dto';
 import { CustomersService } from './customers.service';
 import { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
@@ -134,6 +135,15 @@ export class CustomersController {
     return toCustomerProfileResponse(
       await this.customersService.updateProfile(user.id, dto),
     );
+  }
+
+  @ApiOperation({ summary: 'My corporate credit movements (paginated)' })
+  @Get('me/credit/movements')
+  listMyCreditMovements(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: PaginationQueryDto,
+  ) {
+    return this.customersService.listMyCreditMovements(user.id, query);
   }
 
   @ApiOperation({ summary: 'List my customer addresses' })

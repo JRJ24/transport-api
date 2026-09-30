@@ -12,6 +12,7 @@ import {
   SEND_NOTIFICATION_JOB,
   type SendNotificationJob,
 } from './notification.queue';
+import { NotificationPreferencesService } from './notification-preferences.service';
 import { PushDeliveryService } from './push-delivery.service';
 import {
   buildTemplate,
@@ -32,6 +33,7 @@ export class NotificationDispatcherService {
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeService,
     private readonly pushDelivery: PushDeliveryService,
+    private readonly preferences: NotificationPreferencesService,
     @Inject(notificationConfig.KEY)
     private readonly config: ConfigType<typeof notificationConfig>,
     @Optional()
@@ -66,6 +68,17 @@ export class NotificationDispatcherService {
       data: template.data,
       createdAt: notification.createdAt.toISOString(),
     });
+
+    // The user may have muted push for this category; in-app stays.
+    if (!(await this.preferences.allowsPush(userId, template.category))) {
+      return this.prisma.notification.update({
+        where: { id: notification.id },
+        data: {
+          status: NOTIFICATION_STATUS.SKIPPED,
+          failureReason: 'Push disabled by user preference',
+        },
+      });
+    }
 
     await this.schedulePush(notification.id);
     return notification;

@@ -20,6 +20,7 @@ import {
   VERIFICATION_STATUS,
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import { DISPATCH_WAITING_STATUSES } from '@/common/constants/order-status.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { matchingConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
@@ -226,7 +227,7 @@ export class AssignmentsService {
     }
 
     if (
-      currentOrder.status !== STATUS_ORDERS.REQUESTED ||
+      !DISPATCH_WAITING_STATUSES.includes(currentOrder.status) ||
       !DISPATCHABLE_PAYMENT_STATUSES.includes(currentOrder.paymentStatus)
     ) {
       throw new ForbiddenException({
@@ -245,7 +246,7 @@ export class AssignmentsService {
       const claimedOrder = await tx.transportOrder.updateMany({
         where: {
           id: dto.orderId,
-          status: STATUS_ORDERS.REQUESTED,
+          status: { in: DISPATCH_WAITING_STATUSES },
           paymentStatus: { in: [...DISPATCHABLE_PAYMENT_STATUSES] },
           orderAssignments: {
             none: { assignmentStatus: { in: [...ACTIVE_ASSIGNMENT_STATUSES] } },
@@ -357,7 +358,7 @@ export class AssignmentsService {
     }
 
     if (
-      order.status !== STATUS_ORDERS.REQUESTED ||
+      !DISPATCH_WAITING_STATUSES.includes(order.status) ||
       !DISPATCHABLE_PAYMENT_STATUSES.includes(order.paymentStatus)
     ) {
       throw new ForbiddenException({
@@ -379,7 +380,7 @@ export class AssignmentsService {
       const claimedOrder = await tx.transportOrder.updateMany({
         where: {
           id: orderId,
-          status: STATUS_ORDERS.REQUESTED,
+          status: { in: DISPATCH_WAITING_STATUSES },
           paymentStatus: { in: [...DISPATCHABLE_PAYMENT_STATUSES] },
           orderAssignments: {
             none: { assignmentStatus: { in: [...ACTIVE_ASSIGNMENT_STATUSES] } },

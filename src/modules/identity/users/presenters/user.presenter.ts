@@ -10,6 +10,7 @@ export interface UserResponse {
   fullName: string;
   email: string;
   phone: string;
+  avatarUrl: string | null;
   status: STATUS_ACCOUNT;
   roles: ROLES[];
   lastLoginAt: Date | null;
@@ -22,6 +23,7 @@ export function toUserResponse(user: UserWithRoles): UserResponse {
     fullName: user.fullName,
     email: user.email,
     phone: user.phone,
+    avatarUrl: user.avatarUrl,
     status: user.status,
     roles: user.userRoles.map((userRole) => userRole.rol.code),
     lastLoginAt: user.lastLoginAt,

@@ -5,8 +5,14 @@ import {
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
 } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  ApiBearerAuth,
+  ApiOperation,
+  ApiQuery,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { DriverOffer, OrderAssignment } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
@@ -30,9 +36,12 @@ export class DispatchController {
   }
 
   @ApiOperation({ summary: 'List available drivers for dispatch' })
+  @ApiQuery({ name: 'orderId', required: false, format: 'uuid' })
   @Get('available-drivers')
-  availableDrivers() {
-    return this.service.availableDrivers();
+  availableDrivers(
+    @Query('orderId', new ParseUUIDPipe({ optional: true })) orderId?: string,
+  ) {
+    return this.service.availableDrivers(orderId);
   }
 
   @ApiOperation({

@@ -3,9 +3,10 @@ import type { DriverOffer, OrderAssignment } from '@generated/prisma/client';
 import {
   PAYMENT_STATUS,
   STATUS_DRIVER,
-  STATUS_ORDERS,
+  STATUS_VEHICLE,
   VERIFICATION_STATUS,
 } from '@generated/prisma/enums';
+import { DISPATCH_WAITING_STATUSES } from '@/common/constants/order-status.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
 import { MatchingService } from '../matching/matching.service';
@@ -37,7 +38,7 @@ export class DispatchService {
   pendingOrders() {
     return this.prisma.transportOrder.findMany({
       where: {
-        status: STATUS_ORDERS.REQUESTED,
+        status: { in: DISPATCH_WAITING_STATUSES },
         paymentStatus: { in: [PAYMENT_STATUS.PAID, PAYMENT_STATUS.AUTHORIZED] },
       },
       include: { orderStops: true, orderItems: true },
@@ -45,11 +46,36 @@ export class DispatchService {
     });
   }
 
-  availableDrivers() {
+  /**
+   * Available, approved drivers. With `orderId`, only those with an active
+   * vehicle of the order's category, so a pick can never end in an empty
+   * vehicle list. The ranking (`candidates`) is the preferred view.
+   */
+  async availableDrivers(orderId?: string) {
+    let driverIds: string[] | undefined;
+    if (orderId) {
+      const order = await this.prisma.transportOrder.findUnique({
+        where: { id: orderId },
+        select: { vehicleCategoryId: true },
+      });
+      const vehicles = order
+        ? await this.prisma.vehicle.findMany({
+            where: {
+              categoryId: order.vehicleCategoryId,
+              status: STATUS_VEHICLE.ACTIVE,
+            },
+            select: { driverId: true },
+          })
+        : [];
+      driverIds = [...new Set(vehicles.map((vehicle) => vehicle.driverId))];
+    }
+
     return this.prisma.driverProfile.findMany({
       where: {
         availabilityStatus: STATUS_DRIVER.AVAILABLE,
         verificationStatus: VERIFICATION_STATUS.APPROVED,
+        licenseExpiration: { gt: new Date() },
+        ...(driverIds && { id: { in: driverIds } }),
       },
       include: { user: { select: SAFE_USER_SELECT } },
       orderBy: { ratingAVG: 'desc' },

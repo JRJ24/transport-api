@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 import type { Prisma, WebhookEvent } from '@generated/prisma/client';
 import {
   PAYMENT_STATUS,
@@ -7,12 +7,16 @@ import {
   STATUS_ORDERS,
 } from '@generated/prisma/enums';
 import { PrismaService } from '@/database/prisma.service';
+import { DispatchTriggerService } from '@/modules/operations/offers/dispatch-trigger.service';
 import { optionalString } from '../payments/providers/payment-provider.interface';
 import type { CreateWebhookEventDto } from './dto/create-webhook-event.dto';
 
 @Injectable()
 export class WebhooksService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly dispatchTrigger?: DispatchTriggerService,
+  ) {}
 
   list(): Promise<WebhookEvent[]> {
     return this.prisma.webhookEvent.findMany({
@@ -115,6 +119,7 @@ export class WebhooksService {
             },
             data: { status: STATUS_ORDERS.REQUESTED },
           });
+          this.dispatchTrigger?.orderMaybeDispatchable(payment.orderId);
         }
 
         await tx.paymentTransaction.create({

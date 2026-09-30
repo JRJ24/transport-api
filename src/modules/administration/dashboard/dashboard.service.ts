@@ -34,7 +34,9 @@ export class DashboardService {
       vehicles,
       ordersByStatus,
       openIncidents,
-      pendingOrders: ordersByStatus[STATUS_ORDERS.REQUESTED] ?? 0,
+      pendingOrders:
+        (ordersByStatus[STATUS_ORDERS.REQUESTED] ?? 0) +
+        (ordersByStatus[STATUS_ORDERS.ASSIGNING_DRIVER] ?? 0),
     };
   }
 }

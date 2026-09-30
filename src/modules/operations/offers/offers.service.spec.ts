@@ -85,7 +85,14 @@ async function setup(rank: MatchingResult) {
       findUnique: jest.fn().mockResolvedValue({ userId: 'user-d1' }),
     },
     transportOrder: {
-      findUnique: jest.fn().mockResolvedValue({ orderCode: 'RD-1' }),
+      findUnique: jest.fn().mockResolvedValue({
+        orderCode: 'RD-1',
+        status: 'REQUESTED',
+        paymentStatus: 'PAID',
+      }),
+      // isWaitingForOffer: the order is paid, driverless and has no offer.
+      findFirst: jest.fn().mockResolvedValue({ id: 'order-1' }),
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     driverOffer: {
       findMany: jest.fn().mockResolvedValue([]),
@@ -142,6 +149,8 @@ async function setup(rank: MatchingResult) {
   } as unknown as AssignmentsService;
   const realtime = {
     emitOfferUpdated: jest.fn(),
+    emitMatchingStatus: jest.fn(),
+    emitOrderStatusChanged: jest.fn(),
   } as unknown as RealtimeService;
   const notifications = {
     dispatch: jest.fn().mockResolvedValue(undefined),
@@ -166,6 +175,7 @@ async function setup(rank: MatchingResult) {
     matching,
     assignments,
     scheduler,
+    realtime,
     client,
     offerUpdateMany,
   };
@@ -357,5 +367,81 @@ describe('OffersService.manualAssign', () => {
         reason: 'x',
       }),
     ).rejects.toThrow(/POSITION_STALE/);
+  });
+});
+
+describe('OffersService order status while dispatching', () => {
+  it('marks the order ASSIGNING_DRIVER while an offer is open', async () => {
+    const { service, prisma, realtime } = await setup(
+      ranking([candidate('d1', 1)]),
+    );
+
+    await service.offerNext('order-1');
+
+    expect(prisma.transportOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', status: 'REQUESTED' },
+      data: { status: 'ASSIGNING_DRIVER' },
+    });
+    expect(realtime.emitMatchingStatus).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderId: 'order-1',
+        state: 'OFFERING',
+        attempt: 1,
+      }),
+    );
+  });
+
+  it('puts the order back in the queue when nobody is left', async () => {
+    const { service, prisma, realtime } = await setup(ranking([]));
+
+    await service.offerNext('order-1');
+
+    expect(prisma.transportOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', status: 'ASSIGNING_DRIVER' },
+      data: { status: 'REQUESTED' },
+    });
+    expect(realtime.emitMatchingStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ state: 'NO_DRIVERS' }),
+    );
+  });
+
+  it('does not offer an order that is no longer waiting', async () => {
+    const { service, prisma, matching } = await setup(
+      ranking([candidate('d1', 1)]),
+    );
+    (prisma.transportOrder.findFirst as jest.Mock).mockResolvedValue(null);
+
+    expect(await service.offerNext('order-1')).toBeNull();
+    expect(matching.rankForOrder).not.toHaveBeenCalled();
+  });
+});
+
+describe('OffersService.onOrderDispatchable', () => {
+  it('announces the paid order and offers it at once', async () => {
+    const { service, prisma, realtime } = await setup(
+      ranking([candidate('d1', 1)]),
+    );
+
+    await service.onOrderDispatchable('order-1');
+
+    expect(realtime.emitOrderStatusChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId: 'order-1', status: 'REQUESTED' }),
+    );
+    expect(prisma.driverOffer.create).toHaveBeenCalled();
+  });
+
+  it('ignores an order whose payment did not stick', async () => {
+    const { service, prisma, realtime } = await setup(
+      ranking([candidate('d1', 1)]),
+    );
+    (prisma.transportOrder.findUnique as jest.Mock).mockResolvedValue({
+      status: 'PENDING_PAYMENT',
+      paymentStatus: 'PENDING',
+    });
+
+    await service.onOrderDispatchable('order-1');
+
+    expect(realtime.emitOrderStatusChanged).not.toHaveBeenCalled();
+    expect(prisma.driverOffer.create).not.toHaveBeenCalled();
   });
 });

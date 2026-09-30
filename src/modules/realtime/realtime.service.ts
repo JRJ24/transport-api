@@ -163,6 +163,22 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     this.io?.to('tracking:operations').emit('assignment.created', payload);
   }
 
+  /**
+   * Where the automatic search for a driver stands, for the customer and TMS
+   * watching the order: offering to someone, or nobody nearby.
+   */
+  emitMatchingStatus(payload: {
+    orderId: string;
+    state: 'SEARCHING' | 'OFFERING' | 'NO_DRIVERS';
+    attempt: number;
+    etaSeconds?: number | null;
+    expiresAt?: string | null;
+    at: string;
+  }): void {
+    this.io?.to(`order:${payload.orderId}`).emit('matching.status', payload);
+    this.io?.to('tracking:operations').emit('matching.status', payload);
+  }
+
   /** A dispatch offer was made to a driver, or its state changed. */
   emitOfferUpdated(payload: {
     offerId: string;

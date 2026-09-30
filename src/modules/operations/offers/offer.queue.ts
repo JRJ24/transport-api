@@ -3,9 +3,14 @@ export const MATCHING_QUEUE = 'matching';
 
 export const OFFER_EXPIRE_JOB = 'offer-expire';
 export const DISPATCH_SWEEP_JOB = 'dispatch-sweep';
+export const DISPATCH_ORDER_JOB = 'dispatch-order';
 
 export interface OfferExpireJob {
   offerId: string;
+}
+
+export interface DispatchOrderJob {
+  orderId: string;
 }
 
 /**
