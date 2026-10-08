@@ -191,7 +191,10 @@ describe('EvidenceAccessService.assertEntityAccess', () => {
     it.each(['DeliveryProof', 'DELIVERY_PROOF', 'delivery_proof'])(
       '%s of an assigned order: read and write allowed',
       async (type) => {
-        const prisma = makePrisma({ assignment: true, proofOrderId: 'order-1' });
+        const prisma = makePrisma({
+          assignment: true,
+          proofOrderId: 'order-1',
+        });
         const service = build(prisma);
         await expect(
           service.assertEntityAccess(driver, type, 'proof-1', 'read'),
@@ -203,11 +206,10 @@ describe('EvidenceAccessService.assertEntityAccess', () => {
           where: { id: 'proof-1' },
           select: { orderId: true },
         });
-        expect(prisma.orderAssignment.findFirst).toHaveBeenCalledWith(
-          expect.objectContaining({
-            where: expect.objectContaining({ orderId: 'order-1' }),
-          }),
-        );
+        const [query] = prisma.orderAssignment.findFirst.mock.calls[0] as [
+          { where: { orderId: string } },
+        ];
+        expect(query.where.orderId).toBe('order-1');
       },
     );
 
@@ -225,7 +227,12 @@ describe('EvidenceAccessService.assertEntityAccess', () => {
     it('unknown DeliveryProof id: same 403, existence is not revealed', async () => {
       const prisma = makePrisma({ assignment: true, proofOrderId: null });
       await expect(
-        build(prisma).assertEntityAccess(driver, 'DeliveryProof', 'nope', 'read'),
+        build(prisma).assertEntityAccess(
+          driver,
+          'DeliveryProof',
+          'nope',
+          'read',
+        ),
       ).rejects.toBeInstanceOf(ForbiddenException);
       expect(prisma.orderAssignment.findFirst).not.toHaveBeenCalled();
     });
@@ -263,7 +270,12 @@ describe('EvidenceAccessService.assertEntityAccess', () => {
       const prisma = makePrisma({ ownOrder: true, proofOrderId: 'order-1' });
       const service = build(prisma);
       await expect(
-        service.assertEntityAccess(customer, 'DeliveryProof', 'proof-1', 'read'),
+        service.assertEntityAccess(
+          customer,
+          'DeliveryProof',
+          'proof-1',
+          'read',
+        ),
       ).resolves.toBeUndefined();
       // La foto de la prueba cuenta para cerrar la entrega: no la escribe el
       // cliente.

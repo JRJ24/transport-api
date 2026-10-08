@@ -51,7 +51,9 @@ const stored = (name: string): UploadedFile => ({
   url: `https://cdn.test/evidences/${name}`,
 });
 
-function makePrisma(opts: { assignment?: boolean; proofOrderId?: string } = {}) {
+function makePrisma(
+  opts: { assignment?: boolean; proofOrderId?: string } = {},
+) {
   return {
     attachment: {
       create: jest
@@ -182,9 +184,7 @@ describe('AttachmentsService.upload', () => {
 
     expect(processUploadedFilesMock).toHaveBeenCalledTimes(1);
     expect(prisma.deliveryProof.findUnique).not.toHaveBeenCalled();
-    expect(result).toEqual([
-      { file: stored('photo.jpg'), attachment: null },
-    ]);
+    expect(result).toEqual([{ file: stored('photo.jpg'), attachment: null }]);
     expect(prisma.attachment.create).not.toHaveBeenCalled();
   });
 

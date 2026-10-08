@@ -73,8 +73,11 @@ export class AttachmentsService {
     return this.createFromUploadedFiles(user, stored, entityType, entityId);
   }
 
-  /** Solo para archivos ya autorizados y guardados (ver upload). */
-  async createFromUploadedFiles(
+  /**
+   * Solo para archivos ya autorizados y guardados (ver upload). Privado: no
+   * verifica acceso, y antes el controller lo llamaba directo.
+   */
+  private async createFromUploadedFiles(
     user: AuthenticatedUser,
     files: UploadedFile[],
     entityType?: string,

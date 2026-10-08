@@ -460,6 +460,22 @@ export class AssignmentsService {
   async accept(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
     const assignment = await this.prisma.$transaction(async (tx) => {
       await this.assertCanMutateAssignment(tx, id, user);
+      const pending = await this.findPendingAssignment(tx, id);
+
+      // La orden se bloquea antes que la asignacion, igual que en
+      // OrdersService.cancel/updateStatus: en el orden inverso un accept y una
+      // cancelacion simultaneos se esperaban el uno al otro (deadlock) y
+      // Postgres abortaba uno con un 500.
+      const order = await tx.transportOrder.updateMany({
+        where: { id: pending.orderId, status: STATUS_ORDERS.ASSIGNED },
+        data: { status: STATUS_ORDERS.ACCEPTED },
+      });
+      if (order.count !== 1) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'Order is no longer waiting for this driver',
+        });
+      }
       // Compare-and-set: two concurrent accepts, or an accept racing a
       // reject, must leave exactly one outcome.
       await this.transition(
@@ -476,16 +492,6 @@ export class AssignmentsService {
         where: { id },
       });
 
-      const order = await tx.transportOrder.updateMany({
-        where: { id: assignment.orderId, status: STATUS_ORDERS.ASSIGNED },
-        data: { status: STATUS_ORDERS.ACCEPTED },
-      });
-      if (order.count !== 1) {
-        throw new ConflictException({
-          code: ERROR_CODES.RESOURCE_CONFLICT,
-          message: 'Order is no longer waiting for this driver',
-        });
-      }
       await this.recordEvent(
         tx,
         assignment.orderId,
@@ -510,6 +516,14 @@ export class AssignmentsService {
   async reject(id: string, user: AuthenticatedUser): Promise<OrderAssignment> {
     const assignment = await this.prisma.$transaction(async (tx) => {
       await this.assertCanMutateAssignment(tx, id, user);
+      const pending = await this.findPendingAssignment(tx, id);
+
+      // Orden antes que asignacion, como en accept(): evita el deadlock con
+      // una cancelacion simultanea de la misma orden.
+      await tx.transportOrder.updateMany({
+        where: { id: pending.orderId, status: STATUS_ORDERS.ASSIGNED },
+        data: { status: STATUS_ORDERS.REQUESTED },
+      });
       await this.transition(
         tx,
         id,
@@ -524,10 +538,6 @@ export class AssignmentsService {
         where: { id },
       });
 
-      await tx.transportOrder.updateMany({
-        where: { id: assignment.orderId, status: STATUS_ORDERS.ASSIGNED },
-        data: { status: STATUS_ORDERS.REQUESTED },
-      });
       await tx.driverProfile.updateMany({
         where: {
           id: assignment.driverId,
@@ -580,6 +590,32 @@ export class AssignmentsService {
 
       return assignment;
     });
+  }
+
+  /**
+   * Lectura previa, sin bloquear, para saber que orden bloquear primero. Da
+   * los mismos errores que transition() en el caso secuencial (404 si no
+   * existe, 409 si ya no esta PENDING); la carrera la sigue decidiendo el
+   * compare-and-set de transition().
+   */
+  private async findPendingAssignment(
+    tx: Prisma.TransactionClient,
+    id: string,
+  ): Promise<OrderAssignment> {
+    const assignment = await tx.orderAssignment.findUnique({ where: { id } });
+    if (!assignment) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Assignment not found',
+      });
+    }
+    if (assignment.assignmentStatus !== ASSIGNMENT_STATUS.PENDING) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: 'Assignment is no longer pending',
+      });
+    }
+    return assignment;
   }
 
   /** Moves an assignment out of `from`, or fails if someone got there first. */

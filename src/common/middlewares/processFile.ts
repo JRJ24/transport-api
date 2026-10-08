@@ -1,5 +1,6 @@
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { BadRequestException, HttpStatus, Logger } from '@nestjs/common';
+import type { NestExpressApplication } from '@nestjs/platform-express';
 import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
 import { mkdir, writeFile } from 'fs/promises';
@@ -34,10 +35,7 @@ const EXTENSION_BY_MIME_TYPE = new Map<string, string>([
     'docx',
   ],
   ['application/vnd.ms-excel', 'xls'],
-  [
-    'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-    'xlsx',
-  ],
+  ['application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'xlsx'],
   ['text/csv', 'csv'],
   ['text/plain', 'txt'],
   ['video/mp4', 'mp4'],
@@ -60,7 +58,7 @@ export function isAllowedUploadMimeType(mimeType: string): boolean {
 const sanitizeFileName = (fileName: string) => {
   const safeName = fileName
     .normalize('NFD')
-    .replace(/[̀-ͯ]/g, '')
+    .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^a-zA-Z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '')
     .toLowerCase();
@@ -144,8 +142,7 @@ const buildLocalPublicUrl = (req: Request, key: string) => {
 };
 
 export type StorageTarget =
-  | { driver: 'spaces'; bucket: string }
-  | { driver: 'local' };
+  { driver: 'spaces'; bucket: string } | { driver: 'local' };
 
 const warnedMessages = new Set<string>();
 
@@ -259,6 +256,28 @@ export function setLocalUploadHeaders(res: Response, filePath: string): void {
   // (un .html o .svg ejecutaria script en el origen del API).
   res.setHeader('Content-Type', 'application/octet-stream');
   res.setHeader('Content-Disposition', 'attachment');
+}
+
+/**
+ * Monta el static de uploads locales (lo llama main.ts). Aqui y no en main.ts
+ * para poder probar con helmet delante que las URLs que arma
+ * buildLocalPublicUrl responden y que solo esta ruta relaja CORP. Llamar
+ * despues de helmet(), para que setLocalUploadHeaders pise su header.
+ */
+export function serveLocalUploads(
+  app: Pick<NestExpressApplication, 'useStaticAssets'>,
+): void {
+  const { root, prefix } = getLocalUploadMount();
+  app.useStaticAssets(root, {
+    prefix,
+    index: false,
+    redirect: false,
+    fallthrough: true,
+    // Las claves son unicas (uuid o timestamp) y no se sobrescriben.
+    maxAge: '7d',
+    immutable: true,
+    setHeaders: setLocalUploadHeaders,
+  });
 }
 
 const toWebp = async (buffer: Buffer): Promise<Buffer> => {

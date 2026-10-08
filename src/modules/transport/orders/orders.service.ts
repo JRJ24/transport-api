@@ -141,6 +141,16 @@ const ACTIVE_DRIVER_ORDER_STATUSES: STATUS_ORDERS[] = [
   STATUS_ORDERS.IN_PROGRESS,
 ];
 
+/**
+ * Asignaciones con las que un conductor puede cambiar el estado de la orden.
+ * PENDING aun no la acepto y REJECTED ya no la lleva.
+ */
+const DRIVER_HOLDER_ASSIGNMENT_STATUSES: ASSIGNMENT_STATUS[] = [
+  ASSIGNMENT_STATUS.ACCEPTED,
+  ASSIGNMENT_STATUS.COMPLETED,
+  ASSIGNMENT_STATUS.CANCELLED,
+];
+
 /** Estados que cierran la orden sin entrega: el conductor queda libre. */
 const DRIVER_RELEASE_STATUSES = new Set<STATUS_ORDERS>([
   STATUS_ORDERS.CANCELLED,
@@ -804,6 +814,7 @@ export class OrdersService {
 
     await this.assertDriverCanAccessOrder(user, id);
     this.assertStatusTransition(user, current.status, dto.status);
+    await this.assertDriverHoldsOrder(user, id);
     if (dto.status === STATUS_ORDERS.DELIVERED) {
       await this.assertDeliveryEvidenceReady(id);
     }
@@ -1366,6 +1377,43 @@ export class OrdersService {
       : null;
 
     if (!assignment) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'This order is not assigned to you',
+      });
+    }
+  }
+
+  /**
+   * Un conductor solo cambia el estado de la orden que lleva (o que llevo
+   * hasta cerrarla).
+   *
+   * assertDriverCanAccessOrder acepta cualquier asignacion (sirve para leer el
+   * historial), asi que uno que la rechazo y vio como se la daban a otro podia
+   * marcarla FAILED o DELIVERED, y con la liberacion de releaseOrderDrivers
+   * eso cancelaba la asignacion del conductor que de verdad la lleva.
+   * COMPLETED y CANCELLED quedan cuando ese mismo conductor cerro la orden (o
+   * staff cerro su asignacion): hacen falta para el reintento del mismo
+   * estado que manda la cola offline de la app.
+   */
+  private async assertDriverHoldsOrder(
+    user: AuthenticatedUser,
+    orderId: string,
+  ): Promise<void> {
+    if (!this.isDriverOnly(user)) {
+      return;
+    }
+
+    const held = await this.prisma.orderAssignment.findFirst({
+      where: {
+        orderId,
+        assignmentStatus: { in: DRIVER_HOLDER_ASSIGNMENT_STATUSES },
+        driver: { userId: user.id },
+      },
+      select: { id: true },
+    });
+
+    if (!held) {
       throw new ForbiddenException({
         code: ERROR_CODES.FORBIDDEN,
         message: 'This order is not assigned to you',

@@ -74,7 +74,10 @@ describe('AttachmentsController upload (multipart contract)', () => {
       .post('/attachments/upload')
       .field('entityType', 'DeliveryProof')
       .field('entityId', 'proof-1')
-      .attach('files', jpeg, { filename: 'photo.jpg', contentType: 'image/jpeg' })
+      .attach('files', jpeg, {
+        filename: 'photo.jpg',
+        contentType: 'image/jpeg',
+      })
       .expect(401);
     expect(service.upload).not.toHaveBeenCalled();
   });
@@ -84,7 +87,10 @@ describe('AttachmentsController upload (multipart contract)', () => {
       .post('/attachments/upload')
       .set('Authorization', 'Bearer t')
       // app-customers manda primero los archivos y despues los campos.
-      .attach('files', jpeg, { filename: 'photo.jpg', contentType: 'image/jpeg' })
+      .attach('files', jpeg, {
+        filename: 'photo.jpg',
+        contentType: 'image/jpeg',
+      })
       .attach('files', jpeg, {
         filename: 'signature.png',
         contentType: 'image/png',
@@ -116,7 +122,10 @@ describe('AttachmentsController upload (multipart contract)', () => {
     await request(server)
       .post('/attachments/upload')
       .set('Authorization', 'Bearer t')
-      .attach('files', jpeg, { filename: 'photo.jpg', contentType: 'image/jpeg' })
+      .attach('files', jpeg, {
+        filename: 'photo.jpg',
+        contentType: 'image/jpeg',
+      })
       .expect(201);
     expect({ ...(service.upload.mock.calls[0][2] as object) }).toEqual({});
   });
@@ -127,7 +136,10 @@ describe('AttachmentsController upload (multipart contract)', () => {
       .set('Authorization', 'Bearer t')
       .field('entityType', 'DeliveryProof')
       .field('uploadedFiles', 'spoofed')
-      .attach('files', jpeg, { filename: 'photo.jpg', contentType: 'image/jpeg' })
+      .attach('files', jpeg, {
+        filename: 'photo.jpg',
+        contentType: 'image/jpeg',
+      })
       .expect(400);
     expect((res.body as { error: { code: string } }).error.code).toBe(
       'VALIDATION_FAILED',

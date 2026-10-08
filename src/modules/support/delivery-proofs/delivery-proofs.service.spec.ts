@@ -69,7 +69,9 @@ const whereOf = (prisma: ReturnType<typeof makePrisma>) =>
 describe('DeliveryProofsService.list scoping', () => {
   it('staff keeps arbitrary filters without orderId (portal evidence page)', async () => {
     const prisma = makePrisma();
-    await build(prisma).list(operator, { validationStatus: 'PENDING' as never });
+    await build(prisma).list(operator, {
+      validationStatus: 'PENDING' as never,
+    });
     expect(whereOf(prisma)).toEqual({ validationStatus: 'PENDING' });
     expect(prisma.orderAssignment.findFirst).not.toHaveBeenCalled();
   });

@@ -7,9 +7,8 @@ import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
 import {
-  getLocalUploadMount,
   resolveStorageTarget,
-  setLocalUploadHeaders,
+  serveLocalUploads,
 } from './common/middlewares/processFile';
 import { appConfig } from './config';
 
@@ -40,17 +39,7 @@ async function bootstrap(): Promise<void> {
   // sirven en la misma ruta con la que processFile arma la URL, fuera del
   // prefijo api/v1. Va despues de helmet para que setLocalUploadHeaders pueda
   // relajar Cross-Origin-Resource-Policy solo en esta ruta.
-  const uploads = getLocalUploadMount();
-  app.useStaticAssets(uploads.root, {
-    prefix: uploads.prefix,
-    index: false,
-    redirect: false,
-    fallthrough: true,
-    // Las claves son unicas (uuid o timestamp) y no se sobrescriben.
-    maxAge: '7d',
-    immutable: true,
-    setHeaders: setLocalUploadHeaders,
-  });
+  serveLocalUploads(app);
   // Avisa al arrancar (una sola vez) si falta el bucket y se usara disco.
   resolveStorageTarget();
 

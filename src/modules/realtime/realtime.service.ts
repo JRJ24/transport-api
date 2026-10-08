@@ -29,6 +29,17 @@ import { RuntimeSettingsService } from '@/modules/administration/settings/runtim
 /** Perfil del conductor de una conexion, consultado una vez y compartido. */
 type DriverLookup = () => Promise<{ id: string } | null>;
 
+/**
+ * Asignaciones que dejan a un conductor entrar a order:{id}. REJECTED y
+ * CANCELLED no: ese conductor ya no lleva la orden, y sus cambios le llegan
+ * por driver:{id} cuando lo incluyen en driverIds.
+ */
+const WATCHABLE_ASSIGNMENT_STATUSES: ASSIGNMENT_STATUS[] = [
+  ASSIGNMENT_STATUS.PENDING,
+  ASSIGNMENT_STATUS.ACCEPTED,
+  ASSIGNMENT_STATUS.COMPLETED,
+];
+
 interface TrackingLocationPayload {
   driverId?: string;
   orderId: string;
@@ -572,8 +583,15 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       if (!driver) {
         return false;
       }
+      // Con cualquier asignacion bastaba: quien rechazo la orden podia seguir
+      // en su room y ver la ubicacion en vivo del conductor que la tomo
+      // despues. Misma regla que EVIDENCE_ASSIGNMENT_STATUSES.
       const assignment = await this.prisma.orderAssignment.findFirst({
-        where: { orderId, driverId: driver.id },
+        where: {
+          orderId,
+          driverId: driver.id,
+          assignmentStatus: { in: WATCHABLE_ASSIGNMENT_STATUSES },
+        },
         select: { id: true },
       });
       if (assignment) {

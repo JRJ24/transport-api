@@ -386,3 +386,84 @@ describe('OrdersService.confirmByCustomer', () => {
     );
   });
 });
+
+describe('OrdersService.updateStatus driver authorization', () => {
+  const HOLDER = [
+    ASSIGNMENT_STATUS.ACCEPTED,
+    ASSIGNMENT_STATUS.COMPLETED,
+    ASSIGNMENT_STATUS.CANCELLED,
+  ];
+
+  it('refuses a driver who rejected the order another driver now holds', async () => {
+    const { service, prisma, tx, realtime } = setup({
+      status: STATUS_ORDERS.IN_PROGRESS,
+    });
+    // Tiene una asignacion (la rechazada), asi que puede leer la orden, pero
+    // ninguna con la que la lleve.
+    prisma.orderAssignment.findFirst
+      .mockResolvedValueOnce({ id: 'asg-old' })
+      .mockResolvedValueOnce(null);
+
+    await expect(
+      service.updateStatus(driverUser, 'order-1', {
+        status: STATUS_ORDERS.FAILED,
+      }),
+    ).rejects.toMatchObject({
+      status: 403,
+      response: { message: 'This order is not assigned to you' },
+    });
+
+    expect(prisma.orderAssignment.findFirst).toHaveBeenLastCalledWith({
+      where: {
+        orderId: 'order-1',
+        assignmentStatus: { in: HOLDER },
+        driver: { userId: 'user-d1' },
+      },
+      select: { id: true },
+    });
+    // Ni la orden ni la asignacion del otro conductor se tocan.
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+    expect(tx.orderAssignment.updateMany).not.toHaveBeenCalled();
+    expect(realtime.emitOrderStatusChanged).not.toHaveBeenCalled();
+  });
+
+  it('also refuses that driver repeating the current status', async () => {
+    const { service, prisma } = setup({ status: STATUS_ORDERS.IN_PROGRESS });
+    prisma.orderAssignment.findFirst
+      .mockResolvedValueOnce({ id: 'asg-old' })
+      .mockResolvedValueOnce(null);
+
+    // Repetir IN_PROGRESS reescribia pickupAt y creaba otro evento.
+    await expect(
+      service.updateStatus(driverUser, 'order-1', {
+        status: STATUS_ORDERS.IN_PROGRESS,
+      }),
+    ).rejects.toMatchObject({ status: 403 });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('lets the driver who delivered repeat DELIVERED (offline queue retry)', async () => {
+    const { service, prisma } = setup({ status: STATUS_ORDERS.DELIVERED });
+
+    await expect(
+      service.updateStatus(driverUser, 'order-1', {
+        status: STATUS_ORDERS.DELIVERED,
+      }),
+    ).resolves.toMatchObject({ id: 'order-1' });
+    expect(prisma.orderAssignment.findFirst).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ assignmentStatus: { in: HOLDER } }),
+      }),
+    );
+  });
+
+  it('does not ask staff for an assignment', async () => {
+    const { service, prisma } = setup();
+
+    await service.updateStatus(operator, 'order-1', {
+      status: STATUS_ORDERS.CANCELLED,
+    });
+
+    expect(prisma.orderAssignment.findFirst).not.toHaveBeenCalled();
+  });
+});
