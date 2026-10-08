@@ -1,25 +1,32 @@
-import { Body, Controller, Get, Post, Query, Req } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  Query,
+  Req,
+  UploadedFiles,
+  UseInterceptors,
+} from '@nestjs/common';
+import { AnyFilesInterceptor } from '@nestjs/platform-express';
+import {
+  ApiBearerAuth,
+  ApiConsumes,
+  ApiOperation,
+  ApiTags,
+} from '@nestjs/swagger';
 import type { Attachment } from '@generated/prisma/client';
 import { ROLES } from '@generated/prisma/enums';
 import type { Request } from 'express';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
-import type { UploadedFile } from '@/common/middlewares/processFile';
 import {
   AttachmentsService,
   type UploadedAttachment,
 } from './attachments.service';
 import { CreateAttachmentDto } from './dto/create-attachment.dto';
-
-type UploadRequest = Request & {
-  body: {
-    uploadedFiles?: UploadedFile[];
-    entityType?: string;
-    entityId?: string;
-  };
-};
+import { UploadAttachmentsDto } from './dto/upload-attachments.dto';
 
 @ApiTags('attachments')
 @ApiBearerAuth()
@@ -31,10 +38,11 @@ export class AttachmentsController {
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get()
   list(
+    @CurrentUser() user: AuthenticatedUser,
     @Query('entityType') entityType?: string,
     @Query('entityId') entityId?: string,
   ): Promise<Attachment[]> {
-    return this.service.list(entityType, entityId);
+    return this.service.list(user, entityType, entityId);
   }
 
   @ApiOperation({ summary: 'Create attachment metadata' })
@@ -47,18 +55,23 @@ export class AttachmentsController {
     return this.service.create(user, dto);
   }
 
-  @ApiOperation({ summary: 'Upload files and optionally attach them to an entity' })
+  // AnyFilesInterceptor (opciones en AttachmentsModule) y no un middleware:
+  // los interceptores corren despues de los guards, asi que sin token o sin
+  // rol el multipart ni se lee. Acepta cualquier nombre de campo, como el
+  // multer.any() anterior; las apps usan 'files'.
+  @ApiOperation({
+    summary: 'Upload files and optionally attach them to an entity',
+  })
+  @ApiConsumes('multipart/form-data')
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Post('upload')
+  @UseInterceptors(AnyFilesInterceptor())
   upload(
     @CurrentUser() user: AuthenticatedUser,
-    @Req() req: UploadRequest,
+    @UploadedFiles() files: Express.Multer.File[] | undefined,
+    @Body() dto: UploadAttachmentsDto,
+    @Req() req: Request,
   ): Promise<UploadedAttachment[]> {
-    return this.service.createFromUploadedFiles(
-      user,
-      req.body.uploadedFiles ?? [],
-      req.body.entityType,
-      req.body.entityId,
-    );
+    return this.service.upload(user, files, dto, req);
   }
 }

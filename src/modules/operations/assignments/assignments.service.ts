@@ -139,12 +139,16 @@ export class AssignmentsService {
    *
    * Realtime is fire-and-forget by design: an unreachable socket must never
    * roll back an assignment that already committed.
+   *
+   * driverId va tambien a la room del conductor: su app recarga las
+   * asignaciones con este evento aunque no tenga esa orden abierta.
    */
   private announceOrderStatus(
     orderId: string,
     status: STATUS_ORDERS,
     previousStatus: STATUS_ORDERS,
     userId: string,
+    driverId: string,
   ): void {
     this.realtime.emitOrderStatusChanged({
       orderId,
@@ -152,6 +156,7 @@ export class AssignmentsService {
       previousStatus,
       changedByUserId: userId,
       changedAt: new Date().toISOString(),
+      driverIds: [driverId],
     });
     void this.notifyCustomerOrderStatus(orderId, status);
   }
@@ -314,6 +319,7 @@ export class AssignmentsService {
       STATUS_ORDERS.ASSIGNED,
       currentOrder.status,
       user.id,
+      dto.driverId,
     );
     return assignment;
   }
@@ -445,6 +451,7 @@ export class AssignmentsService {
       STATUS_ORDERS.ACCEPTED,
       STATUS_ORDERS.REQUESTED,
       user.id,
+      driver.id,
     );
 
     return assignment;
@@ -494,6 +501,7 @@ export class AssignmentsService {
       STATUS_ORDERS.ACCEPTED,
       STATUS_ORDERS.ASSIGNED,
       user.id,
+      assignment.driverId,
     );
 
     return assignment;
@@ -543,6 +551,7 @@ export class AssignmentsService {
       STATUS_ORDERS.REQUESTED,
       STATUS_ORDERS.ASSIGNED,
       user.id,
+      assignment.driverId,
     );
 
     return assignment;

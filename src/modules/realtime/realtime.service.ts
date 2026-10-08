@@ -26,6 +26,9 @@ import {
 } from '@/modules/operations/presence/presence.service';
 import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
+/** Perfil del conductor de una conexion, consultado una vez y compartido. */
+type DriverLookup = () => Promise<{ id: string } | null>;
+
 interface TrackingLocationPayload {
   driverId?: string;
   orderId: string;
@@ -83,7 +86,7 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
         );
     });
 
-    this.io.on('connection', (socket) => void this.handleConnection(socket));
+    this.io.on('connection', (socket) => this.handleConnection(socket));
     this.logger.log('Socket.IO tracking gateway started');
   }
 
@@ -117,21 +120,36 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     this.io.to('tracking:operations').emit(event, data);
   }
 
-  /** Broadcasts an order-status change to watchers of that order + operations. */
+  /**
+   * Broadcasts an order-status change to watchers of that order, to the
+   * drivers assigned to it and to operations.
+   *
+   * driverIds solo enruta: la app del conductor recarga sus asignaciones con
+   * este evento, pero solo estaba en order:{id} de la orden abierta, asi que
+   * una cancelacion de otra orden suya no le llegaba. Va en UNA sola emision
+   * a todas las rooms para que socket.io no lo duplique a quien este en
+   * varias, y se quita del payload para que los clientes reciban lo mismo
+   * que antes.
+   */
   emitOrderStatusChanged(payload: {
     orderId: string;
     status: string;
     previousStatus?: string;
     changedByUserId?: string;
     changedAt: string;
+    driverIds?: string[];
   }): void {
     if (!this.io) {
       return;
     }
+    const { driverIds, ...event } = payload;
+    const driverRooms = [...new Set(driverIds ?? [])]
+      .filter(Boolean)
+      .map((driverId) => `driver:${driverId}`);
     this.io
-      .to(`order:${payload.orderId}`)
-      .emit('order.status.changed', payload);
-    this.io.to('tracking:operations').emit('order.status.changed', payload);
+      .to([`order:${event.orderId}`, ...driverRooms])
+      .emit('order.status.changed', event);
+    this.io.to('tracking:operations').emit('order.status.changed', event);
   }
 
   /** Broadcasts a newly created order to the TMS operations room. */
@@ -233,7 +251,7 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     this.emitToUser(userId, 'notification.created', notification);
   }
 
-  private async handleConnection(socket: Socket): Promise<void> {
+  private handleConnection(socket: Socket): void {
     const user = socket.data.user as AuthenticatedUser;
     this.logger.debug(`Socket connected for ${user.email}`);
 
@@ -246,18 +264,71 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       void socket.join('tracking:operations');
     }
 
+    const driverOf = this.memoizedDriverLookup(user);
+
+    // Los listeners se registran antes de cualquier await: socket.io descarta
+    // los eventos que llegan sin listener, y la app movil re-emite
+    // tracking:join-order apenas recibe 'connect'. Con la consulta del perfil
+    // delante, esas rooms se perdian en cada reconexion.
+    this.registerSocketHandlers(socket, user, driverOf);
+
     // Drivers auto-join their own driver room so they receive their live feed.
     if (user.roles.includes(ROLES.DRIVER)) {
-      const driver = await this.prisma.driverProfile.findFirst({
-        where: { userId: user.id },
-        select: { id: true },
-      });
-      if (driver) {
+      void this.joinDriverRooms(socket, user, driverOf);
+    }
+  }
+
+  /**
+   * Una sola consulta del perfil por conexion: la app se une a todas sus
+   * ordenes asignadas al conectar. Solo se recuerda un perfil encontrado, para
+   * no negarle las rooms a uno creado despues de conectar ni fijar un error.
+   */
+  private memoizedDriverLookup(user: AuthenticatedUser): DriverLookup {
+    let pending: Promise<{ id: string } | null> | null = null;
+    return () => {
+      pending ??= this.prisma.driverProfile
+        .findFirst({ where: { userId: user.id }, select: { id: true } })
+        .then(
+          (driver) => {
+            if (!driver) {
+              pending = null;
+            }
+            return driver;
+          },
+          (error: unknown) => {
+            pending = null;
+            throw error;
+          },
+        );
+      return pending;
+    };
+  }
+
+  private async joinDriverRooms(
+    socket: Socket,
+    user: AuthenticatedUser,
+    driverOf: DriverLookup,
+  ): Promise<void> {
+    try {
+      const driver = await driverOf();
+      // Si el socket se cerro mientras tanto, unirlo dejaria su id colgado
+      // en las rooms del adapter.
+      if (driver && socket.connected) {
         void socket.join(`driver:${driver.id}`);
         void socket.join('drivers:requests');
       }
+    } catch (error) {
+      this.logger.error(
+        `Driver rooms failed for ${user.id}: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
     }
+  }
 
+  private registerSocketHandlers(
+    socket: Socket,
+    user: AuthenticatedUser,
+    driverOf: DriverLookup,
+  ): void {
     socket.on('tracking:join-order', async (payload: { orderId?: string }) => {
       if (
         typeof payload?.orderId !== 'string' ||
@@ -265,15 +336,30 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       ) {
         return;
       }
-      // Authorize: never let a client subscribe to an arbitrary order room.
-      const allowed = await this.canViewOrder(user, payload.orderId);
-      if (!allowed) {
+      // Un listener async que rechaza es un unhandledRejection, y en Node eso
+      // termina el proceso: un fallo de la base de datos se reporta al cliente.
+      try {
+        // Authorize: never let a client subscribe to an arbitrary order room.
+        const allowed = await this.canViewOrder(
+          user,
+          payload.orderId,
+          driverOf,
+        );
+        if (!allowed) {
+          socket.emit('tracking:error', {
+            message: 'Not authorized to watch this order',
+          });
+          return;
+        }
+        await socket.join(`order:${payload.orderId}`);
+      } catch (error) {
+        this.logger.error(
+          `Join order failed for ${user.id}: ${error instanceof Error ? error.message : 'unknown'}`,
+        );
         socket.emit('tracking:error', {
-          message: 'Not authorized to watch this order',
+          message: 'Could not join this order right now',
         });
-        return;
       }
-      await socket.join(`order:${payload.orderId}`);
     });
 
     socket.on('tracking:leave-order', async (payload: { orderId?: string }) => {
@@ -473,6 +559,7 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
   private async canViewOrder(
     user: AuthenticatedUser,
     orderId: string,
+    driverOf: DriverLookup = this.memoizedDriverLookup(user),
   ): Promise<boolean> {
     if (
       user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
@@ -481,10 +568,7 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     }
 
     if (user.roles.includes(ROLES.DRIVER)) {
-      const driver = await this.prisma.driverProfile.findFirst({
-        where: { userId: user.id },
-        select: { id: true },
-      });
+      const driver = await driverOf();
       if (!driver) {
         return false;
       }

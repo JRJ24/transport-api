@@ -1,5 +1,5 @@
 import {
-  ForbiddenException,
+  BadRequestException,
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
@@ -8,10 +8,11 @@ import type {
   Prisma,
   Signature,
 } from '@generated/prisma/client';
-import { ROLES, STOP_TYPE, VALIDATION } from '@generated/prisma/enums';
+import { STOP_TYPE, VALIDATION } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
+import { EvidenceAccessService } from '../evidence-access/evidence-access.service';
 import type { DeliveryProofQueryDto } from './dto/delivery-proof-query.dto';
 import type { CreateDeliveryProofDto } from './dto/create-delivery-proof.dto';
 import type { CreateSignatureDto } from './dto/create-signature.dto';
@@ -26,9 +27,28 @@ const PROOF_ENTITY_TYPES = [
 
 @Injectable()
 export class DeliveryProofsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly access: EvidenceAccessService,
+  ) {}
 
-  async list(query: DeliveryProofQueryDto): Promise<DeliveryProof[]> {
+  async list(
+    user: AuthenticatedUser,
+    query: DeliveryProofQueryDto,
+  ): Promise<DeliveryProof[]> {
+    // El portal (staff) filtra libremente. Conductor y cliente solo ven las
+    // pruebas de una orden suya: sin orderId el listado devolvia las de
+    // todas las ordenes, con la cedula del receptor y el email del conductor.
+    if (!this.access.isStaff(user)) {
+      if (!query.orderId) {
+        throw new BadRequestException({
+          code: ERROR_CODES.BAD_REQUEST,
+          message: 'orderId is required',
+        });
+      }
+      await this.access.assertOrderAccess(user, query.orderId);
+    }
+
     const where: Prisma.DeliveryProofWhereInput = {
       ...(query.orderId && { orderId: query.orderId }),
       ...(query.proofType && { proofType: query.proofType }),
@@ -117,7 +137,7 @@ export class DeliveryProofsService {
     user: AuthenticatedUser,
     dto: CreateDeliveryProofDto,
   ): Promise<DeliveryProof> {
-    await this.assertDriverAssignedToOrder(user, dto.orderId);
+    await this.assertCanWriteEvidence(user, dto.orderId);
 
     return this.prisma.deliveryProof.create({
       data: {
@@ -201,7 +221,7 @@ export class DeliveryProofsService {
       });
     }
 
-    await this.assertDriverAssignedToOrder(user, proof.orderId);
+    await this.assertCanWriteEvidence(user, proof.orderId);
 
     return this.prisma.signature.create({
       data: {
@@ -212,38 +232,18 @@ export class DeliveryProofsService {
     });
   }
 
-  private async assertDriverAssignedToOrder(
+  /**
+   * Misma regla que antes (staff libre, conductor con asignacion en la orden)
+   * pero desde EvidenceAccessService: ahora una asignacion REJECTED o
+   * CANCELLED ya no basta, y ser el cliente de la orden tampoco.
+   */
+  private assertCanWriteEvidence(
     user: AuthenticatedUser,
     orderId: string,
   ): Promise<void> {
-    if (
-      user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
-    ) {
-      return;
-    }
-
-    const driver = await this.prisma.driverProfile.findFirst({
-      where: { userId: user.id },
-      select: { id: true },
+    return this.access.assertOrderAccess(user, orderId, {
+      allowCustomer: false,
+      message: 'You cannot create evidence for an unassigned order',
     });
-
-    if (!driver) {
-      throw new NotFoundException({
-        code: ERROR_CODES.RESOURCE_NOT_FOUND,
-        message: 'Driver profile not found',
-      });
-    }
-
-    const assignment = await this.prisma.orderAssignment.findFirst({
-      where: { orderId, driverId: driver.id },
-      select: { id: true },
-    });
-
-    if (!assignment) {
-      throw new ForbiddenException({
-        code: ERROR_CODES.FORBIDDEN,
-        message: 'You cannot create evidence for an unassigned order',
-      });
-    }
   }
 }

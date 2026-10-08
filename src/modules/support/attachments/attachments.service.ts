@@ -1,9 +1,16 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
 import type { Attachment } from '@generated/prisma/client';
+import type { Request } from 'express';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
-import type { UploadedFile } from '@/common/middlewares/processFile';
+import {
+  processUploadedFiles,
+  type UploadedFile,
+} from '@/common/middlewares/processFile';
 import { PrismaService } from '@/database/prisma.service';
+import { EvidenceAccessService } from '../evidence-access/evidence-access.service';
 import type { CreateAttachmentDto } from './dto/create-attachment.dto';
+import type { UploadAttachmentsDto } from './dto/upload-attachments.dto';
 
 export interface UploadedAttachment {
   file: UploadedFile;
@@ -12,16 +19,23 @@ export interface UploadedAttachment {
 
 @Injectable()
 export class AttachmentsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly access: EvidenceAccessService,
+  ) {}
 
-  create(
+  async create(
     user: AuthenticatedUser,
     dto: CreateAttachmentDto,
   ): Promise<Attachment> {
+    const entityType = dto.entityType.trim();
+    const entityId = dto.entityId.trim();
+    await this.access.assertEntityAccess(user, entityType, entityId, 'write');
+
     return this.prisma.attachment.create({
       data: {
-        entityType: dto.entityType.trim(),
-        entityId: dto.entityId.trim(),
+        entityType,
+        entityId,
         fileName: dto.fileName.trim(),
         fileUrl: dto.fileUrl.trim(),
         fileSize: dto.fileSize,
@@ -32,6 +46,34 @@ export class AttachmentsService {
     });
   }
 
+  /**
+   * POST /attachments/upload. Orden importante: primero autorizar y despues
+   * escribir en el storage, para que un 403 no deje archivos publicos
+   * huerfanos. Sin entityType+entityId solo se sube el archivo (attachment
+   * null), permitido a cualquier usuario autenticado como hasta ahora.
+   */
+  async upload(
+    user: AuthenticatedUser,
+    files: Express.Multer.File[] | undefined,
+    dto: UploadAttachmentsDto,
+    req: Request,
+  ): Promise<UploadedAttachment[]> {
+    const entityType = dto.entityType?.trim();
+    const entityId = dto.entityId?.trim();
+
+    if (entityType && entityId) {
+      await this.access.assertEntityAccess(user, entityType, entityId, 'write');
+    }
+
+    if (!files || files.length === 0) {
+      return [];
+    }
+
+    const stored = await processUploadedFiles(files, req);
+    return this.createFromUploadedFiles(user, stored, entityType, entityId);
+  }
+
+  /** Solo para archivos ya autorizados y guardados (ver upload). */
   async createFromUploadedFiles(
     user: AuthenticatedUser,
     files: UploadedFile[],
@@ -64,12 +106,37 @@ export class AttachmentsService {
     );
   }
 
-  list(entityType?: string, entityId?: string): Promise<Attachment[]> {
+  async list(
+    user: AuthenticatedUser,
+    entityType?: string,
+    entityId?: string,
+  ): Promise<Attachment[]> {
+    // Staff (portal) sigue listando con filtros libres, como antes.
+    if (this.access.isStaff(user)) {
+      return this.prisma.attachment.findMany({
+        where: {
+          ...(entityType && { entityType }),
+          ...(entityId && { entityId }),
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+    }
+
+    // Conductor o cliente: sin entidad concreta el listado devolvia los
+    // adjuntos de todas las ordenes.
+    const type = entityType?.trim();
+    const id = entityId?.trim();
+    if (!type || !id) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'entityType and entityId are required',
+      });
+    }
+
+    await this.access.assertEntityAccess(user, type, id, 'read');
+
     return this.prisma.attachment.findMany({
-      where: {
-        ...(entityType && { entityType }),
-        ...(entityId && { entityId }),
-      },
+      where: { entityType: type, entityId: id },
       orderBy: { createdAt: 'desc' },
     });
   }

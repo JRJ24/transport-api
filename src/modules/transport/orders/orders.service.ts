@@ -9,6 +9,7 @@ import type { Prisma, TransportOrder } from '@generated/prisma/client';
 import {
   ASSIGNMENT_STATUS,
   EVENT_TYPE,
+  OFFER_STATUS,
   PAYMENT_STATUS,
   QUOTE_STATUS,
   RESERVATIONS_STATUS,
@@ -19,6 +20,7 @@ import {
   STATUS_ORDERS,
   STATUS_VEHICLE,
   STOP_TYPE,
+  TRACKING_SESSIONS,
   VERIFICATION_STATUS,
 } from '@generated/prisma/enums';
 import type { OrderAssignment } from '@generated/prisma/client';
@@ -138,6 +140,12 @@ const ACTIVE_DRIVER_ORDER_STATUSES: STATUS_ORDERS[] = [
   STATUS_ORDERS.ACCEPTED,
   STATUS_ORDERS.IN_PROGRESS,
 ];
+
+/** Estados que cierran la orden sin entrega: el conductor queda libre. */
+const DRIVER_RELEASE_STATUSES = new Set<STATUS_ORDERS>([
+  STATUS_ORDERS.CANCELLED,
+  STATUS_ORDERS.FAILED,
+]);
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -800,6 +808,9 @@ export class OrdersService {
       await this.assertDeliveryEvidenceReady(id);
     }
 
+    // Conductores cuya asignacion se cierra en esta transaccion: ya no salen
+    // como activos en la orden devuelta, pero su app debe enterarse.
+    const closedForDriverIds: string[] = [];
     const order = await this.prisma.$transaction(async (tx) => {
       await tx.transportOrder.update({
         where: { id },
@@ -843,7 +854,14 @@ export class OrdersService {
             where: { id: assignment.driverId },
             data: { availabilityStatus: STATUS_DRIVER.AVAILABLE },
           });
+          closedForDriverIds.push(assignment.driverId);
         }
+      }
+
+      if (DRIVER_RELEASE_STATUSES.has(dto.status)) {
+        closedForDriverIds.push(
+          ...(await this.releaseOrderDrivers(tx, id, now)),
+        );
       }
 
       return tx.transportOrder.findUniqueOrThrow({
@@ -852,12 +870,17 @@ export class OrdersService {
       });
     });
 
+    if (DRIVER_RELEASE_STATUSES.has(dto.status)) {
+      await this.cancelOpenOffers(id);
+    }
+
     this.realtime.emitOrderStatusChanged({
       orderId: id,
       status: dto.status,
       previousStatus: current.status,
       changedByUserId: user.id,
       changedAt: now.toISOString(),
+      driverIds: [...this.activeDriverIds(order), ...closedForDriverIds],
     });
 
     void this.notifyOperators('ORDER_STATUS_CHANGED', order, dto.status).catch(
@@ -989,6 +1012,7 @@ export class OrdersService {
       previousStatus: current.status,
       changedByUserId: user.id,
       changedAt: new Date().toISOString(),
+      driverIds: this.activeDriverIds(order),
     });
 
     void this.notifyOperators(
@@ -1023,12 +1047,14 @@ export class OrdersService {
 
     await this.assertCanReadOrder(user, current.customerId);
 
+    const now = new Date();
+    const releasedDriverIds: string[] = [];
     const order = await this.prisma.$transaction(async (tx) => {
-      const order = await tx.transportOrder.update({
+      await tx.transportOrder.update({
         where: { id },
         data: { status: STATUS_ORDERS.CANCELLED },
-        include: ORDER_INCLUDE,
       });
+      releasedDriverIds.push(...(await this.releaseOrderDrivers(tx, id, now)));
 
       await tx.orderCancellation.create({
         data: {
@@ -1077,14 +1103,21 @@ export class OrdersService {
         },
       });
 
-      return order;
+      // Se relee al final para devolver las asignaciones ya canceladas.
+      return tx.transportOrder.findUniqueOrThrow({
+        where: { id },
+        include: ORDER_INCLUDE,
+      });
     });
+
+    await this.cancelOpenOffers(id);
 
     this.realtime.emitOrderStatusChanged({
       orderId: id,
       status: STATUS_ORDERS.CANCELLED,
       changedByUserId: user.id,
-      changedAt: new Date().toISOString(),
+      changedAt: now.toISOString(),
+      driverIds: releasedDriverIds,
     });
     void this.notifyOperators('ORDER_CANCELLED', order).catch(
       (error: unknown) =>
@@ -1108,6 +1141,120 @@ export class OrdersService {
       where: { orderId },
       orderBy: { createdAt: 'asc' },
     });
+  }
+
+  /**
+   * Cierra lo que una orden cancelada o fallida dejaba vivo para el conductor
+   * y devuelve a quienes tenian la asignacion.
+   *
+   * Sin esto la asignacion seguia ACCEPTED y el conductor BUSY: la app mostraba
+   * la tarea muerta, 'Iniciar servicio' la revivia como IN_PROGRESS y el
+   * conductor no volvia a recibir ofertas. Corre dentro de la transaccion y
+   * despues de actualizar la orden: un claim concurrente espera el bloqueo de
+   * esa fila y luego la ve cerrada, asi que no queda una asignacion nueva viva.
+   */
+  private async releaseOrderDrivers(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    now: Date,
+  ): Promise<string[]> {
+    const active = await tx.orderAssignment.findMany({
+      where: { orderId, assignmentStatus: { in: ACTIVE_ASSIGNMENT_STATUSES } },
+      select: { id: true, driverId: true },
+    });
+    const driverIds = [...new Set(active.map((row) => row.driverId))];
+
+    if (active.length > 0) {
+      await tx.orderAssignment.updateMany({
+        where: {
+          id: { in: active.map((row) => row.id) },
+          assignmentStatus: { in: ACTIVE_ASSIGNMENT_STATUSES },
+        },
+        data: { assignmentStatus: ASSIGNMENT_STATUS.CANCELLED },
+      });
+      // Solo vuelve a AVAILABLE quien estaba BUSY y no tiene otro viaje vivo:
+      // OFFLINE o SUSPENDED se respetan, igual que en reject() y complete().
+      await tx.driverProfile.updateMany({
+        where: {
+          id: { in: driverIds },
+          availabilityStatus: STATUS_DRIVER.BUSY,
+          orderAssignments: {
+            none: {
+              orderId: { not: orderId },
+              assignmentStatus: { in: ACTIVE_ASSIGNMENT_STATUSES },
+              order: { status: { in: ACTIVE_DRIVER_ORDER_STATUSES } },
+            },
+          },
+        },
+        data: { availabilityStatus: STATUS_DRIVER.AVAILABLE },
+      });
+    }
+
+    // Con la sesion ACTIVE la app seguia en viaje sobre una orden cerrada.
+    await tx.trackingSession.updateMany({
+      where: { orderId, status: TRACKING_SESSIONS.ACTIVE },
+      data: { status: TRACKING_SESSIONS.ENDED, endedAt: now },
+    });
+
+    return driverIds;
+  }
+
+  /**
+   * Cancela las ofertas automaticas que seguian abiertas para la orden y se
+   * lo dice al conductor ofertado (best-effort).
+   *
+   * El sweep ya las cancela (cancelStale), pero hasta su siguiente pasada el
+   * conductor veia una oferta de una orden cerrada. Va despues del commit y
+   * oferta por oferta, como cancelStale: aceptar una oferta bloquea la oferta
+   * antes que la orden, y hacerlo dentro de la transaccion al reves podia
+   * terminar en deadlock.
+   */
+  private async cancelOpenOffers(orderId: string): Promise<void> {
+    try {
+      const open = await this.prisma.driverOffer.findMany({
+        where: { orderId, status: OFFER_STATUS.PENDING },
+      });
+      for (const offer of open) {
+        const moved = await this.prisma.driverOffer.updateMany({
+          where: { id: offer.id, status: OFFER_STATUS.PENDING },
+          data: {
+            status: OFFER_STATUS.CANCELLED,
+            respondedAt: new Date(),
+            reason: 'Order is no longer waiting for a driver',
+          },
+        });
+        if (moved.count === 1) {
+          this.realtime.emitOfferUpdated({
+            offerId: offer.id,
+            orderId: offer.orderId,
+            driverId: offer.driverId,
+            status: OFFER_STATUS.CANCELLED,
+            mode: offer.mode,
+            rank: offer.rank,
+            etaSeconds: offer.etaSeconds,
+            expiresAt: offer.expiresAt?.toISOString() ?? null,
+          });
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to cancel open offers for order ${orderId}: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    }
+  }
+
+  /** Conductores con una asignacion viva en la orden. */
+  private activeDriverIds(order: {
+    orderAssignments: {
+      driverId: string;
+      assignmentStatus: ASSIGNMENT_STATUS;
+    }[];
+  }): string[] {
+    return order.orderAssignments
+      .filter((row) =>
+        ACTIVE_ASSIGNMENT_STATUSES.includes(row.assignmentStatus),
+      )
+      .map((row) => row.driverId);
   }
 
   private async assertDeliveryEvidenceReady(orderId: string): Promise<void> {

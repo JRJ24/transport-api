@@ -29,8 +29,11 @@ export class DeliveryProofsController {
   @ApiOperation({ summary: 'List delivery proofs' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get()
-  list(@Query() query: DeliveryProofQueryDto): Promise<DeliveryProof[]> {
-    return this.service.list(query);
+  list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: DeliveryProofQueryDto,
+  ): Promise<DeliveryProof[]> {
+    return this.service.list(user, query);
   }
 
   @ApiOperation({ summary: 'Capture delivery proof' })

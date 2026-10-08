@@ -6,6 +6,11 @@ import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import { Logger } from 'nestjs-pino';
 import { AppModule } from './app.module';
+import {
+  getLocalUploadMount,
+  resolveStorageTarget,
+  setLocalUploadHeaders,
+} from './common/middlewares/processFile';
 import { appConfig } from './config';
 
 async function bootstrap(): Promise<void> {
@@ -30,6 +35,30 @@ async function bootstrap(): Promise<void> {
   });
 
   app.use(helmet());
+
+  // Uploads en disco local (STORAGE_DRIVER=local, o spaces sin bucket): se
+  // sirven en la misma ruta con la que processFile arma la URL, fuera del
+  // prefijo api/v1. Va despues de helmet para que setLocalUploadHeaders pueda
+  // relajar Cross-Origin-Resource-Policy solo en esta ruta.
+  const uploads = getLocalUploadMount();
+  app.useStaticAssets(uploads.root, {
+    prefix: uploads.prefix,
+    index: false,
+    redirect: false,
+    fallthrough: true,
+    // Las claves son unicas (uuid o timestamp) y no se sobrescriben.
+    maxAge: '7d',
+    immutable: true,
+    setHeaders: setLocalUploadHeaders,
+  });
+  // Avisa al arrancar (una sola vez) si falta el bucket y se usara disco.
+  resolveStorageTarget();
+
+  // El default de Express es 100kb y un lote de tracking de 500 puntos
+  // (el maximo del DTO) pasa de eso: daba 413 antes de validar. Despues de
+  // CORS, como el parser que Nest registra por defecto (y que ya no agrega),
+  // para que un 413 o un JSON roto sigan llevando los headers CORS.
+  app.useBodyParser('json', { limit: '1mb' });
 
   app.useGlobalPipes(
     new ValidationPipe({
