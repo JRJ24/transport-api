@@ -445,3 +445,78 @@ describe('OffersService.onOrderDispatchable', () => {
     expect(prisma.driverOffer.create).not.toHaveBeenCalled();
   });
 });
+
+describe('OffersService order-status announcements to drivers', () => {
+  it('sends ASSIGNING_DRIVER to the driver being offered the order', async () => {
+    const { service, realtime } = await setup(ranking([candidate('d1', 1)]));
+
+    await service.offerNext('order-1');
+
+    expect(realtime.emitOrderStatusChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        orderId: 'order-1',
+        status: 'ASSIGNING_DRIVER',
+        previousStatus: 'REQUESTED',
+        driverIds: ['d1'],
+      }),
+    );
+  });
+
+  it('cancels and announces the open offer a manual pick supersedes', async () => {
+    const { service, prisma, realtime, offerUpdateMany } = await setup(
+      ranking([candidate('d2', 1)]),
+    );
+    (prisma.driverOffer.findMany as jest.Mock).mockResolvedValue([
+      {
+        id: 'offer-1',
+        orderId: 'order-1',
+        driverId: 'd1',
+        vehicleId: 'veh-d1',
+        status: OFFER_STATUS.PENDING,
+        mode: OFFER_MODE.AUTO,
+        rank: 1,
+        etaSeconds: 300,
+        expiresAt: null,
+      },
+    ]);
+
+    await service.manualAssign(operator, 'order-1', { driverId: 'd2' });
+
+    expect(offerUpdateMany).toHaveBeenCalledWith({
+      where: { id: 'offer-1', status: OFFER_STATUS.PENDING },
+      data: expect.objectContaining({
+        status: OFFER_STATUS.CANCELLED,
+        reason: 'Superseded by manual assignment',
+      }),
+    });
+    // Sin offer.updated el conductor seguia viendo la oferta hasta que vencia.
+    expect(realtime.emitOfferUpdated).toHaveBeenCalledWith(
+      expect.objectContaining({
+        offerId: 'offer-1',
+        driverId: 'd1',
+        status: OFFER_STATUS.CANCELLED,
+      }),
+    );
+    expect(realtime.emitOrderStatusChanged).toHaveBeenCalledWith(
+      expect.objectContaining({
+        status: 'REQUESTED',
+        previousStatus: 'ASSIGNING_DRIVER',
+        driverIds: ['d1'],
+      }),
+    );
+  });
+
+  it('does not announce an offer the driver accepted meanwhile', async () => {
+    const { service, prisma, realtime, offerUpdateMany } = await setup(
+      ranking([candidate('d2', 1)]),
+    );
+    (prisma.driverOffer.findMany as jest.Mock).mockResolvedValue([
+      { id: 'offer-1', orderId: 'order-1', driverId: 'd1' },
+    ]);
+    offerUpdateMany.mockResolvedValue({ count: 0 });
+
+    await service.manualAssign(operator, 'order-1', { driverId: 'd2' });
+
+    expect(realtime.emitOfferUpdated).not.toHaveBeenCalled();
+  });
+});

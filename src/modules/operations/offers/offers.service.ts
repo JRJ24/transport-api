@@ -257,6 +257,7 @@ export class OffersService {
       orderId,
       STATUS_ORDERS.REQUESTED,
       STATUS_ORDERS.ASSIGNING_DRIVER,
+      [offer.driverId],
     );
     this.announce(offer);
     this.realtime.emitMatchingStatus({
@@ -438,18 +439,19 @@ export class OffersService {
     }
 
     // An automatic offer still open for this order loses to the operator.
-    await this.prisma.driverOffer.updateMany({
-      where: { orderId, status: OFFER_STATUS.PENDING },
-      data: {
-        status: OFFER_STATUS.CANCELLED,
-        respondedAt: new Date(),
-        reason: 'Superseded by manual assignment',
-      },
-    });
+    // Se anuncia: sin offer.updated el conductor seguia viendo la oferta hasta
+    // que vencia, y al aceptarla recibia un conflicto.
+    const superseded = await this.cancelPendingOffers(
+      await this.prisma.driverOffer.findMany({
+        where: { orderId, status: OFFER_STATUS.PENDING },
+      }),
+      'Superseded by manual assignment',
+    );
     await this.setWaitingStatus(
       orderId,
       STATUS_ORDERS.ASSIGNING_DRIVER,
       STATUS_ORDERS.REQUESTED,
+      superseded.map((offer) => offer.driverId),
     );
 
     const assignment = await this.assignments.create(user, {
@@ -550,11 +552,16 @@ export class OffersService {
     return order !== null;
   }
 
-  /** Compare-and-set between REQUESTED and ASSIGNING_DRIVER, announced. */
+  /**
+   * Compare-and-set between REQUESTED and ASSIGNING_DRIVER, announced. Los
+   * driverIds son los conductores de la oferta en juego, para que su app se
+   * entere aunque no tenga la orden abierta.
+   */
   private async setWaitingStatus(
     orderId: string,
     from: STATUS_ORDERS,
     to: STATUS_ORDERS,
+    driverIds: string[] = [],
   ): Promise<void> {
     const moved = await this.prisma.transportOrder.updateMany({
       where: { id: orderId, status: from },
@@ -566,6 +573,7 @@ export class OffersService {
         status: to,
         previousStatus: from,
         changedAt: new Date().toISOString(),
+        driverIds,
       });
     }
   }
@@ -608,19 +616,38 @@ export class OffersService {
       },
       take: 100,
     });
-    for (const offer of stale) {
+    await this.cancelPendingOffers(
+      stale,
+      'Order is no longer waiting for a driver',
+    );
+  }
+
+  /**
+   * Cancels each offer that is still pending (compare-and-set, so one the
+   * driver accepted meanwhile is left alone) and announces it. Returns the
+   * ones it cancelled.
+   */
+  private async cancelPendingOffers(
+    offers: DriverOffer[],
+    reason: string,
+  ): Promise<DriverOffer[]> {
+    const cancelled: DriverOffer[] = [];
+    for (const offer of offers) {
       const moved = await this.prisma.driverOffer.updateMany({
         where: { id: offer.id, status: OFFER_STATUS.PENDING },
         data: {
           status: OFFER_STATUS.CANCELLED,
           respondedAt: new Date(),
-          reason: 'Order is no longer waiting for a driver',
+          reason,
         },
       });
       if (moved.count === 1) {
-        this.announce({ ...offer, status: OFFER_STATUS.CANCELLED });
+        const updated = { ...offer, status: OFFER_STATUS.CANCELLED };
+        this.announce(updated);
+        cancelled.push(updated);
       }
     }
+    return cancelled;
   }
 
   /** Moves on to the next candidate without making the caller wait. */
