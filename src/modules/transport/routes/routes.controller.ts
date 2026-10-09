@@ -9,9 +9,12 @@ import {
 import { Throttle } from '@nestjs/throttler';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
 import { ROLES } from '@generated/prisma/enums';
+import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
+import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { ComputeRouteDto } from '@/integrations/google-maps/dto/compute-route.dto';
 import { GoogleRoutesService } from '@/integrations/google-maps/google-routes.service';
+import { EvidenceAccessService } from '@/modules/support/evidence-access/evidence-access.service';
 import { EstimateRouteDto } from './dto/estimate-route.dto';
 import { OrderApproachService } from './order-approach.service';
 import { OrderRouteService } from './order-route.service';
@@ -20,6 +23,8 @@ import { RoutesService } from './routes.service';
 /** Each of these reaches the billed Routes API; see GoogleMapsController. */
 const perMinute = (limit: number) =>
   Throttle({ default: { limit, ttl: 60_000 } });
+
+const ORDER_ACCESS_DENIED = 'You cannot access this order';
 
 @ApiTags('routes')
 @ApiBearerAuth()
@@ -30,6 +35,7 @@ export class RoutesController {
     private readonly orderRoutes: OrderRouteService,
     private readonly orderApproach: OrderApproachService,
     private readonly googleRoutes: GoogleRoutesService,
+    private readonly access: EvidenceAccessService,
   ) {}
 
   @ApiOperation({
@@ -58,13 +64,29 @@ export class RoutesController {
     });
   }
 
+  /**
+   * Las dos rutas de una orden dibujan sus paradas (direcciones del cliente)
+   * y, la de aproximacion, la ultima posicion del conductor. Filtraban solo
+   * por orderId y las leia cualquier cliente o conductor. Misma regla que la
+   * evidencia: staff, conductor con asignacion PENDING/ACCEPTED/COMPLETED,
+   * cliente dueno. Se comprueba aqui y no en los servicios porque su cache es
+   * por orden y compartida entre quienes la miran: un acierto de cache no
+   * debe saltarse la comprobacion, y un id ajeno no debe gastar una llamada
+   * facturada a Google.
+   */
   @ApiOperation({
     summary: 'Get the cached driving route for an order (polyline + ETA)',
   })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @perMinute(60)
   @Get('orders/:orderId')
-  getOrderRoute(@Param('orderId', ParseUUIDPipe) orderId: string) {
+  async getOrderRoute(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    await this.access.assertOrderAccess(user, orderId, {
+      message: ORDER_ACCESS_DENIED,
+    });
     return this.orderRoutes.getForOrder(orderId);
   }
 
@@ -77,7 +99,13 @@ export class RoutesController {
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @perMinute(60)
   @Get('orders/:orderId/approach')
-  getOrderApproach(@Param('orderId', ParseUUIDPipe) orderId: string) {
+  async getOrderApproach(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('orderId', ParseUUIDPipe) orderId: string,
+  ) {
+    await this.access.assertOrderAccess(user, orderId, {
+      message: ORDER_ACCESS_DENIED,
+    });
     return this.orderApproach.getForOrder(orderId);
   }
 }

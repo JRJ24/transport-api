@@ -149,7 +149,11 @@ export class PricingController {
   @ApiOperation({ summary: 'Get a quote by id' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
   @Get('quotes/:id')
-  getQuote(@Param('id', ParseUUIDPipe) id: string): Promise<PriceQuote | null> {
-    return this.service.getQuote(id);
+  getQuote(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<PriceQuote | null> {
+    // El servicio limita al cliente a sus propias cotizaciones.
+    return this.service.getQuote(user, id);
   }
 }

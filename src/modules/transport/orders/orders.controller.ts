@@ -147,7 +147,12 @@ export class OrdersController {
   @ApiOperation({ summary: 'List order timeline events' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get(':id/events')
-  listEvents(@Param('id', ParseUUIDPipe) id: string) {
-    return this.service.listEvents(id);
+  listEvents(
+    @CurrentUser() user: AuthenticatedUser,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    // El usuario va al servicio: cliente y conductor solo ven la linea de
+    // tiempo de una orden suya (mismos controles que GET /orders/:id).
+    return this.service.listEvents(user, id);
   }
 }

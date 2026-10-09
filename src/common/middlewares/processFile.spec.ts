@@ -1,10 +1,17 @@
 import { BadRequestException, Logger } from '@nestjs/common';
 import type { Request, Response } from 'express';
 import { mkdir, writeFile } from 'fs/promises';
+import os from 'os';
 import path from 'path';
 import {
+  AVATAR_UPLOAD_FOLDER,
+  getConfiguredPublicApiOrigin,
+  getEvidenceUploadFolder,
+  getLocalUploadFolders,
   getLocalUploadMount,
+  getUnservedUploadFolders,
   isAllowedUploadMimeType,
+  isUnsafeLocalUploadRoot,
   processUploadedFiles,
   resolveStorageTarget,
   setLocalUploadHeaders,
@@ -55,6 +62,12 @@ const STORAGE_ENV = [
   'SPACES_UPLOAD_PREFIX',
   'LOCAL_UPLOAD_DIR',
   'LOCAL_UPLOAD_PUBLIC_URL',
+  // Origen de las URLs locales (buildLocalPublicUrl).
+  'PUBLIC_API_BASE_URL',
+  'PAYMENT_CALLBACK_BASE_URL',
+  'CORS_ORIGINS',
+  'NODE_ENV',
+  'PORT',
 ];
 
 let savedEnv: Record<string, string | undefined>;
@@ -102,7 +115,10 @@ describe('resolveStorageTarget', () => {
   it('STORAGE_DRIVER=local goes to disk even with a bucket configured', () => {
     spacesEnv();
     process.env.STORAGE_DRIVER = 'local';
-    expect(resolveStorageTarget()).toEqual({ driver: 'local' });
+    expect(resolveStorageTarget()).toEqual({
+      driver: 'local',
+      reason: 'configured',
+    });
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
@@ -111,23 +127,126 @@ describe('resolveStorageTarget', () => {
     expect(resolveStorageTarget()).toEqual({
       driver: 'spaces',
       bucket: 'ruta-evidences',
+      region: 'nyc3',
     });
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
+  it('reports the region the S3 client really uses', () => {
+    spacesEnv();
+    process.env.SPACES_REGION = 'sfo3';
+    expect(resolveStorageTarget()).toMatchObject({ region: 'sfo3' });
+  });
+
   it('spaces without bucket falls back to disk, warns once and does not throw', () => {
     process.env.STORAGE_DRIVER = 'spaces';
-    expect(resolveStorageTarget()).toEqual({ driver: 'local' });
-    expect(resolveStorageTarget()).toEqual({ driver: 'local' });
+    const fallback = {
+      driver: 'local',
+      reason: 'missing-config',
+      requestedDriver: 'spaces',
+      missing: [
+        'SPACES_BUCKET',
+        'SPACES_ACCESS_KEY_ID',
+        'SPACES_SECRET_ACCESS_KEY',
+      ],
+    };
+    expect(resolveStorageTarget()).toEqual(fallback);
+    expect(resolveStorageTarget()).toEqual(fallback);
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy.mock.calls[0][0]).toContain('SPACES_BUCKET');
   });
 
-  it('spaces with bucket but no credentials also falls back with a warning', () => {
+  it('spaces with bucket but no credentials also falls back, saying what is missing', () => {
     process.env.SPACES_BUCKET = 'ruta-evidences';
-    expect(resolveStorageTarget()).toEqual({ driver: 'local' });
+    expect(resolveStorageTarget()).toEqual({
+      driver: 'local',
+      reason: 'missing-config',
+      requestedDriver: 'spaces',
+      missing: ['SPACES_ACCESS_KEY_ID', 'SPACES_SECRET_ACCESS_KEY'],
+    });
     expect(warnSpy.mock.calls[0][0]).toContain('SPACES_ACCESS_KEY_ID');
   });
+});
+
+describe('upload folders', () => {
+  it('evidences and avatars by default: what storeObject writes', () => {
+    expect(getEvidenceUploadFolder()).toBe('evidences');
+    expect(getLocalUploadFolders()).toEqual([
+      'evidences',
+      AVATAR_UPLOAD_FOLDER,
+    ]);
+  });
+
+  it('SPACES_UPLOAD_PREFIX without surrounding slashes, so keys and mount agree', () => {
+    process.env.SPACES_UPLOAD_PREFIX = '/docs/evidencias/';
+    expect(getEvidenceUploadFolder()).toBe('docs/evidencias');
+    expect(getLocalUploadFolders()).toEqual(['docs/evidencias', 'avatars']);
+  });
+
+  it('a prefix of only slashes keeps the default', () => {
+    process.env.SPACES_UPLOAD_PREFIX = '/';
+    expect(getEvidenceUploadFolder()).toBe('evidences');
+  });
+
+  it('does not repeat a folder when the prefix is avatars', () => {
+    process.env.SPACES_UPLOAD_PREFIX = 'avatars';
+    expect(getLocalUploadFolders()).toEqual(['avatars']);
+  });
+
+  it('every default folder is servable', () => {
+    expect(getUnservedUploadFolders()).toEqual([]);
+    process.env.SPACES_UPLOAD_PREFIX = 'docs/evidencias.v2';
+    expect(getUnservedUploadFolders()).toEqual([]);
+  });
+
+  it.each([
+    ['../outside'],
+    ['docs//evidencias'],
+    ['evidencias prueba'],
+    ['evidences:id'],
+  ])(
+    'SPACES_UPLOAD_PREFIX=%s is reported as unserved (avatars still served)',
+    (prefix) => {
+      process.env.SPACES_UPLOAD_PREFIX = prefix;
+      expect(getUnservedUploadFolders()).toEqual([prefix]);
+    },
+  );
+});
+
+describe('isUnsafeLocalUploadRoot', () => {
+  it('the working directory itself is unsafe', () => {
+    expect(isUnsafeLocalUploadRoot(process.cwd())).toBe(true);
+  });
+
+  it('a folder that contains the working directory is unsafe', () => {
+    expect(isUnsafeLocalUploadRoot(path.dirname(process.cwd()))).toBe(true);
+    expect(isUnsafeLocalUploadRoot(path.parse(process.cwd()).root)).toBe(true);
+  });
+
+  it('a subfolder of the project (the default dist/common/public) is fine', () => {
+    expect(
+      isUnsafeLocalUploadRoot(path.join(process.cwd(), 'dist', 'public')),
+    ).toBe(false);
+  });
+
+  it('a folder elsewhere is fine, also a sibling whose name starts like the project', () => {
+    expect(isUnsafeLocalUploadRoot(path.join(os.tmpdir(), 'uploads'))).toBe(
+      false,
+    );
+    expect(isUnsafeLocalUploadRoot(`${process.cwd()}-uploads`)).toBe(false);
+  });
+
+  it('defaults to LOCAL_UPLOAD_DIR', () => {
+    process.env.LOCAL_UPLOAD_DIR = process.cwd();
+    expect(isUnsafeLocalUploadRoot()).toBe(true);
+  });
+
+  (process.platform === 'win32' ? it : it.skip)(
+    'on Windows the comparison ignores case',
+    () => {
+      expect(isUnsafeLocalUploadRoot(process.cwd().toUpperCase())).toBe(true);
+    },
+  );
 });
 
 describe('storeObject', () => {
@@ -151,8 +270,10 @@ describe('storeObject', () => {
     expect(writeFile).not.toHaveBeenCalled();
   });
 
-  it('local: writes under the upload dir and builds the URL from the forwarded proto/host', async () => {
+  it('local: writes under the upload dir and builds the URL from the configured public origin', async () => {
     process.env.STORAGE_DRIVER = 'local';
+    // Lo que define docker-compose en produccion.
+    process.env.PAYMENT_CALLBACK_BASE_URL = 'https://api.larutard.com.do/api/v1';
     const url = await storeObject({
       key: 'evidences/a.webp',
       body: Buffer.from('x'),
@@ -169,6 +290,7 @@ describe('storeObject', () => {
       path.join(getLocalUploadMount().root, 'evidences', 'a.webp'),
       expect.any(Buffer),
     );
+    // Solo el origen: el static se monta en la raiz, no bajo /api/v1.
     expect(url).toBe('https://api.larutard.com.do/evidences/a.webp');
   });
 
@@ -182,6 +304,170 @@ describe('storeObject', () => {
       req: fakeReq({ host: 'ignored' }),
     });
     expect(url).toBe('http://192.168.1.10:3000/uploads/avatars/u.webp');
+    // avatars/ es una carpeta servida: sin aviso.
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('local: a key outside the served folders is written but warns that its URL will 404', async () => {
+    process.env.STORAGE_DRIVER = 'local';
+    process.env.PUBLIC_API_BASE_URL = 'http://api.test';
+    await storeObject({
+      key: 'documents/a.pdf',
+      body: Buffer.from('x'),
+      contentType: 'application/pdf',
+      req: fakeReq({ host: 'api.test' }),
+    });
+    expect(writeFile).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain('"documents"');
+    expect(warnSpy.mock.calls[0][0]).toContain('evidences, avatars');
+  });
+});
+
+/**
+ * Con trust proxy 1, req.host y req.protocol salen de X-Forwarded-Host/Proto,
+ * y nginx (sin default_server) deja pasar un Host ajeno: ese valor nunca puede
+ * terminar en el fileUrl guardado.
+ */
+describe('local upload URL origin (forged Host / X-Forwarded-Host)', () => {
+  const FORGED = { host: 'api:3000', 'x-forwarded-host': 'evil.example' };
+
+  const storeLocal = (
+    req: Request,
+    key = `evidences/${randomName()}.webp`,
+  ): Promise<string> =>
+    storeObject({
+      key,
+      body: Buffer.from('x'),
+      contentType: 'image/webp',
+      req,
+    });
+
+  let nameCounter = 0;
+  const randomName = () => `file-${++nameCounter}`;
+
+  beforeEach(() => {
+    process.env.STORAGE_DRIVER = 'local';
+  });
+
+  it('PUBLIC_API_BASE_URL wins over the forged header (origin only, also over PAYMENT_CALLBACK_BASE_URL)', async () => {
+    process.env.PUBLIC_API_BASE_URL = 'https://api.larutard.com.do/api/v1/';
+    process.env.PAYMENT_CALLBACK_BASE_URL = 'https://pagos.example.com/api/v1';
+    const url = await storeLocal(fakeReq(FORGED, 'https'), 'evidences/a.webp');
+    expect(url).toBe('https://api.larutard.com.do/evidences/a.webp');
+    expect(url).not.toContain('evil.example');
+  });
+
+  it('without PUBLIC_API_BASE_URL it uses the origin of PAYMENT_CALLBACK_BASE_URL (what production has)', async () => {
+    process.env.PAYMENT_CALLBACK_BASE_URL = 'https://api.larutard.com.do/api/v1';
+    const url = await storeLocal(fakeReq(FORGED, 'http'), 'evidences/b.webp');
+    // Tambien el protocolo sale de la config, no de X-Forwarded-Proto.
+    expect(url).toBe('https://api.larutard.com.do/evidences/b.webp');
+  });
+
+  it('LOCAL_UPLOAD_PUBLIC_URL still has the last word', async () => {
+    process.env.LOCAL_UPLOAD_PUBLIC_URL = 'http://192.168.1.10:3000/uploads';
+    process.env.PUBLIC_API_BASE_URL = 'https://api.larutard.com.do';
+    const url = await storeLocal(fakeReq(FORGED), 'evidences/c.webp');
+    expect(url).toBe('http://192.168.1.10:3000/uploads/evidences/c.webp');
+  });
+
+  it.each([['api.larutard.com.do'], ['javascript:alert(1)'], ['  ']])(
+    'an unusable PUBLIC_API_BASE_URL (%s) is ignored, never echoed',
+    (value) => {
+      process.env.PUBLIC_API_BASE_URL = value;
+      process.env.PAYMENT_CALLBACK_BASE_URL = 'https://api.larutard.com.do/x';
+      expect(getConfiguredPublicApiOrigin()).toBe('https://api.larutard.com.do');
+      delete process.env.PAYMENT_CALLBACK_BASE_URL;
+      expect(getConfiguredPublicApiOrigin()).toBeNull();
+    },
+  );
+
+  it('nothing configured: a host of CORS_ORIGINS is accepted, with the configured protocol', async () => {
+    process.env.CORS_ORIGINS =
+      'https://portal.larutard.com.do, https://api.larutard.com.do';
+    const url = await storeLocal(
+      fakeReq(
+        { host: 'api:3000', 'x-forwarded-host': 'api.larutard.com.do' },
+        'http',
+      ),
+      'evidences/d.webp',
+    );
+    expect(url).toBe('https://api.larutard.com.do/evidences/d.webp');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('nothing configured: a forged host is replaced by the first allowed origin and warns once, without the host', async () => {
+    // Origen unico en este test: warnOnce recuerda los mensajes ya emitidos.
+    process.env.CORS_ORIGINS = 'https://first-allowed.example,https://x.test';
+    process.env.NODE_ENV = 'production';
+    const first = await storeLocal(fakeReq(FORGED, 'https'), 'evidences/e.webp');
+    const second = await storeLocal(
+      fakeReq({ host: 'other-evil.example' }, 'https'),
+    );
+
+    expect(first).toBe('https://first-allowed.example/evidences/e.webp');
+    expect(second).toMatch(/^https:\/\/first-allowed\.example\/evidences\//);
+    // Un solo aviso para hosts distintos: el mensaje no lleva el host
+    // recibido (si no, cada Host falso sumaria una entrada al Set).
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = String(warnSpy.mock.calls[0][0]);
+    expect(message).toContain('PUBLIC_API_BASE_URL');
+    expect(message).not.toContain('evil');
+  });
+
+  it('nothing configured and no CORS_ORIGINS: falls back to localhost on PORT, never the header', async () => {
+    process.env.NODE_ENV = 'production';
+    process.env.PORT = '3999';
+    const url = await storeLocal(fakeReq(FORGED, 'https'), 'evidences/f.webp');
+    expect(url).toBe('http://localhost:3999/evidences/f.webp');
+  });
+
+  it.each([
+    ['localhost:3000', 'http', 'http://localhost:3000'],
+    ['127.0.0.1:3000', 'https', 'https://127.0.0.1:3000'],
+    ['192.168.1.10:3000', 'http', 'http://192.168.1.10:3000'],
+    ['10.0.2.2:3000', 'http', 'http://10.0.2.2:3000'],
+    ['172.20.0.5:3000', 'http', 'http://172.20.0.5:3000'],
+    // X-Forwarded-Proto raro: no se copia.
+    ['localhost:3000', 'javascript', 'http://localhost:3000'],
+  ])(
+    'outside production %s (proto %s) is accepted as %s (dev and LAN phones)',
+    async (host, protocol, origin) => {
+      const url = await storeLocal(fakeReq({ host }, protocol), 'avatars/u.webp');
+      expect(url).toBe(`${origin}/avatars/u.webp`);
+    },
+  );
+
+  it.each([
+    ['localhost:3000'],
+    ['192.168.1.10:3000'],
+  ])('in production %s is not accepted', async (host) => {
+    process.env.NODE_ENV = 'production';
+    process.env.CORS_ORIGINS = 'https://api.larutard.com.do';
+    const url = await storeLocal(fakeReq({ host }), 'evidences/g.webp');
+    expect(url).toBe('https://api.larutard.com.do/evidences/g.webp');
+  });
+
+  it.each([
+    ['evil.example@localhost:3000'],
+    ['localhost:3000/../evil.example'],
+    ['127.0.0.1.evil.example'],
+    ['192.168.1.10.evil.example'],
+  ])(
+    'tricky host %s never smuggles the foreign host into the URL',
+    async (host) => {
+      process.env.CORS_ORIGINS = 'https://api.larutard.com.do';
+      const url = await storeLocal(fakeReq({ host }), 'evidences/h.webp');
+      expect(url).not.toContain('evil');
+      expect(new URL(url).pathname).toBe('/evidences/h.webp');
+    },
+  );
+
+  it('avatars (account.service) follow the same rule', async () => {
+    process.env.PAYMENT_CALLBACK_BASE_URL = 'https://api.larutard.com.do/api/v1';
+    const url = await storeLocal(fakeReq(FORGED, 'https'), 'avatars/u-1.webp');
+    expect(url).toBe('https://api.larutard.com.do/avatars/u-1.webp');
   });
 });
 
@@ -246,6 +532,7 @@ describe('processUploadedFiles', () => {
 
   beforeEach(() => {
     process.env.STORAGE_DRIVER = 'local';
+    process.env.PUBLIC_API_BASE_URL = 'http://api.test';
   });
 
   it('converts images to webp and keeps the UploadedFile shape', async () => {
@@ -262,6 +549,45 @@ describe('processUploadedFiles', () => {
     expect(stored.fileName).toMatch(/^[0-9a-f-]{36}-firma-signature\.webp$/);
     expect(stored.key).toBe(`evidences/${stored.fileName}`);
     expect(stored.url).toBe(`http://api.test/evidences/${stored.fileName}`);
+  });
+
+  it.each([
+    ['signature-1.png', 'image/png'], // app-drivers
+    ['signature-1.svg', 'image/svg+xml'], // transport-driver
+  ])(
+    'a signature %s (%s) is stored as image/webp, which addSignature requires',
+    async (name, mime) => {
+      const [stored] = await processUploadedFiles(
+        [file(name, mime)],
+        fakeReq({ host: 'api.test' }),
+      );
+      expect(stored.mimeType).toBe('image/webp');
+      expect(stored.fileName).toMatch(/-signature-1\.webp$/);
+    },
+  );
+
+  it('the evidence url (the stored fileUrl) ignores a forged X-Forwarded-Host', async () => {
+    const [stored] = await processUploadedFiles(
+      [file('photo.jpg', 'image/jpeg')],
+      fakeReq(
+        { host: 'api:3000', 'x-forwarded-host': 'evil.example' },
+        'https',
+      ),
+    );
+    expect(stored.url).toBe(`http://api.test/evidences/${stored.fileName}`);
+  });
+
+  it('uses SPACES_UPLOAD_PREFIX without surrounding slashes as the key folder', async () => {
+    process.env.SPACES_UPLOAD_PREFIX = '/docs/evidencias/';
+    const [stored] = await processUploadedFiles(
+      [file('a.pdf', 'application/pdf')],
+      fakeReq({ host: 'api.test' }),
+    );
+    expect(stored.key).toBe(`docs/evidencias/${stored.fileName}`);
+    expect(stored.url).toBe(
+      `http://api.test/docs/evidencias/${stored.fileName}`,
+    );
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('the extension follows the declared mime type, not the client name', async () => {

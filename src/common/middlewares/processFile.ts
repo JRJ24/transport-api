@@ -3,6 +3,7 @@ import { BadRequestException, HttpStatus, Logger } from '@nestjs/common';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { randomUUID } from 'crypto';
 import type { Request, Response } from 'express';
+import { realpathSync } from 'fs';
 import { mkdir, writeFile } from 'fs/promises';
 import path from 'path';
 import sharp from 'sharp';
@@ -79,6 +80,8 @@ const getSpacesCredentials = () => ({
     process.env.SPACES_SECRET_ACCESS_KEY || process.env.ACCESS_SECRET_KEY || '',
 });
 
+const getSpacesRegion = () => process.env.SPACES_REGION || 'nyc3';
+
 let s3: { signature: string; client: S3Client } | null = null;
 
 /**
@@ -89,7 +92,7 @@ let s3: { signature: string; client: S3Client } | null = null;
 function getS3Client(): S3Client {
   const credentials = getSpacesCredentials();
   const endpoint = process.env.SPACES_ENDPOINT || undefined;
-  const region = process.env.SPACES_REGION || 'nyc3';
+  const region = getSpacesRegion();
   const signature = [
     endpoint,
     region,
@@ -121,8 +124,7 @@ const buildPublicUrl = (bucketName: string, key: string) => {
     return `${endpointUrl.protocol}//${host}/${key}`;
   }
 
-  const region = process.env.SPACES_REGION || 'nyc3';
-  return `https://${bucketName}.${region}.digitaloceanspaces.com/${key}`;
+  return `https://${bucketName}.${getSpacesRegion()}.digitaloceanspaces.com/${key}`;
 };
 
 const getLocalPublicRoot = () =>
@@ -130,19 +132,95 @@ const getLocalPublicRoot = () =>
     process.env.LOCAL_UPLOAD_DIR || path.join(__dirname, '..', 'public'),
   );
 
-const buildLocalPublicUrl = (req: Request, key: string) => {
-  const publicBase = process.env.LOCAL_UPLOAD_PUBLIC_URL?.replace(/\/+$/, '');
-  if (publicBase) return `${publicBase}/${key}`;
+/** Carpeta de avatares. La clave la arma account.service.ts (uploadAvatar). */
+export const AVATAR_UPLOAD_FOLDER = 'avatars';
 
-  // Con trust proxy, req.protocol y req.host salen de X-Forwarded-Proto y
-  // X-Forwarded-Host: detras de nginx la URL usa el dominio publico y https,
-  // no el host interno al que nginx reenvia.
-  const host = req.host || req.get('host');
-  return `${req.protocol}://${host}/${key}`;
+/**
+ * Carpeta de evidencias (SPACES_UPLOAD_PREFIX), sin barras al inicio ni al
+ * final: con '/evidences/' la clave quedaba '/evidences//x' y su URL no
+ * coincidia con la ruta que monta serveLocalUploads.
+ */
+export function getEvidenceUploadFolder(): string {
+  const folder = (process.env.SPACES_UPLOAD_PREFIX || '')
+    .trim()
+    .replace(/^\/+|\/+$/g, '');
+  return folder || 'evidences';
+}
+
+/**
+ * Carpetas (primer tramo de la clave) que escribe storeObject. serveLocalUploads
+ * publica solo estas y no todo LOCAL_UPLOAD_DIR, para que una carpeta mal
+ * configurada no exponga lo que haya al lado (package.json, dist, .env). Un
+ * llamador nuevo de storeObject con otra carpeta tiene que agregarse aqui.
+ */
+export function getLocalUploadFolders(): string[] {
+  return [...new Set([getEvidenceUploadFolder(), AVATAR_UPLOAD_FOLDER])];
+}
+
+const isPlainFolderSegment = (segment: string) =>
+  /^[a-zA-Z0-9._-]+$/.test(segment) && segment !== '.' && segment !== '..';
+
+/** Un '..' saldria de la raiz y un ':' o '(' romperia la ruta de Express. */
+const isServableUploadFolder = (folder: string) =>
+  folder.split('/').every(isPlainFolderSegment);
+
+/**
+ * Carpetas de getLocalUploadFolders() que serveLocalUploads no monta: sus
+ * archivos se guardan igual pero dan 404. Se exporta para que el estado del
+ * sistema lo muestre como error, igual que un LOCAL_UPLOAD_DIR inseguro, y no
+ * como un simple aviso de disco local.
+ */
+export function getUnservedUploadFolders(): string[] {
+  return getLocalUploadFolders().filter(
+    (folder) => !isServableUploadFolder(folder),
+  );
+}
+
+const realPathOrSelf = (target: string) => {
+  try {
+    return realpathSync.native(target);
+  } catch {
+    // Todavia no existe (se crea con el primer upload): se compara tal cual.
+    return target;
+  }
 };
 
+/**
+ * true si la carpeta de uploads es el directorio de trabajo del proceso o uno
+ * que lo contiene (LOCAL_UPLOAD_DIR=. o la raiz del disco): ahi el codigo, dist
+ * y el .env quedarian junto a los uploads. Se resuelven symlinks para que un
+ * enlace al proyecto no pase el control; path.relative ya compara sin
+ * mayusculas en Windows.
+ */
+export function isUnsafeLocalUploadRoot(
+  root: string = getLocalPublicRoot(),
+): boolean {
+  const relative = path.relative(
+    realPathOrSelf(path.resolve(root)),
+    realPathOrSelf(process.cwd()),
+  );
+  if (relative === '') return true;
+  const cwdIsOutside =
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative);
+  return !cwdIsOutside;
+}
+
+/**
+ * Destino real de storeObject. 'local' dice por que: elegido con
+ * STORAGE_DRIVER=local, o caida a disco porque al bucket le falta
+ * configuracion (lo que el estado del sistema tiene que mostrar como fallo).
+ */
 export type StorageTarget =
-  { driver: 'spaces'; bucket: string } | { driver: 'local' };
+  | { driver: 'spaces'; bucket: string; region: string }
+  | { driver: 'local'; reason: 'configured' }
+  | {
+      driver: 'local';
+      reason: 'missing-config';
+      requestedDriver: string;
+      missing: string[];
+    };
 
 const warnedMessages = new Set<string>();
 
@@ -150,6 +228,96 @@ const warnOnce = (message: string) => {
   if (warnedMessages.has(message)) return;
   warnedMessages.add(message);
   logger.warn(message);
+};
+
+/** URL http(s) valida o null (vacia, sin esquema, javascript:, etc.). */
+const parseHttpUrl = (value: string | undefined): URL | null => {
+  const raw = value?.trim();
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Origen publico configurado de este API: PUBLIC_API_BASE_URL o, si falta, el
+ * de PAYMENT_CALLBACK_BASE_URL, que ya es la base publica del API (CardNET y
+ * AZUL llaman ahi; docker-compose la define siempre, por defecto
+ * https://api.larutard.com.do/api/v1). Solo el origen: el static de uploads se
+ * monta en la raiz del host (getLocalUploadMount); para servirlos bajo otra
+ * ruta esta LOCAL_UPLOAD_PUBLIC_URL.
+ */
+export function getConfiguredPublicApiOrigin(): string | null {
+  return (
+    parseHttpUrl(process.env.PUBLIC_API_BASE_URL)?.origin ??
+    parseHttpUrl(process.env.PAYMENT_CALLBACK_BASE_URL)?.origin ??
+    null
+  );
+}
+
+const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]']);
+const PRIVATE_IPV4 =
+  /^(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/;
+
+/** El propio equipo o una IP de la LAN (un movil probando contra el PC). */
+const isDevHostname = (hostname: string) =>
+  LOOPBACK_HOSTNAMES.has(hostname) || PRIVATE_IPV4.test(hostname);
+
+/**
+ * Origen de las URLs locales cuando no hay nada configurado. El Host de la
+ * peticion no es de fiar: con trust proxy, req.host sale de X-Forwarded-Host,
+ * y nginx no tiene default_server, asi que una peticion con un Host ajeno
+ * llega al API con X-Forwarded-Host = ese host. Un conductor subia una foto
+ * real y el fileUrl guardado quedaba en https://evil.example/evidences/...,
+ * que ademas pasaba el control de firma propia (la URL es la del adjunto).
+ *
+ * Por eso el host solo se acepta si es el de uno de nuestros origenes
+ * (CORS_ORIGINS) o, fuera de produccion, localhost/LAN; si no, se usa el
+ * primer origen permitido. Lo que sale es siempre el origen normalizado por
+ * URL, nunca el header tal cual (un 'a@b' o 'host/x' no cuela nada).
+ */
+const resolveRequestOrigin = (req: Request): string => {
+  const allowed = (process.env.CORS_ORIGINS ?? '')
+    .split(',')
+    .map((origin) => parseHttpUrl(origin))
+    .filter((url): url is URL => url !== null);
+  const isProduction = process.env.NODE_ENV === 'production';
+  const requested = parseHttpUrl(`http://${req.host || req.get('host') || ''}`);
+
+  if (requested) {
+    const match = allowed.find((origin) => origin.host === requested.host);
+    // El protocolo tambien sale de la config, no de X-Forwarded-Proto.
+    if (match) return match.origin;
+    if (!isProduction && isDevHostname(requested.hostname)) {
+      const protocol = req.protocol === 'https' ? 'https' : 'http';
+      return `${protocol}://${requested.host}`;
+    }
+  }
+
+  const fallback =
+    allowed[0]?.origin ?? `http://localhost:${process.env.PORT || 3000}`;
+  // Mensaje fijo, sin el host recibido: warnOnce guarda cada mensaje y un host
+  // por peticion haria crecer ese Set sin limite.
+  warnOnce(
+    `Local upload URL: the request host is not an allowed origin, so ${fallback} is used instead. Set PUBLIC_API_BASE_URL (or LOCAL_UPLOAD_PUBLIC_URL) to the public URL of this API.`,
+  );
+  return fallback;
+};
+
+/**
+ * URL publica de un archivo en disco local. Orden: LOCAL_UPLOAD_PUBLIC_URL
+ * (base completa, tambien fija la ruta del static), el origen configurado del
+ * API y, solo si no hay ninguno, el host de la peticion si esta permitido.
+ */
+const buildLocalPublicUrl = (req: Request, key: string) => {
+  const publicBase = process.env.LOCAL_UPLOAD_PUBLIC_URL?.replace(/\/+$/, '');
+  if (publicBase) return `${publicBase}/${key}`;
+
+  const origin = getConfiguredPublicApiOrigin() ?? resolveRequestOrigin(req);
+  return `${origin}/${key}`;
 };
 
 /**
@@ -162,7 +330,7 @@ const warnOnce = (message: string) => {
 export function resolveStorageTarget(): StorageTarget {
   const driver = (process.env.STORAGE_DRIVER || 'spaces').trim().toLowerCase();
   if (driver === 'local') {
-    return { driver: 'local' };
+    return { driver: 'local', reason: 'configured' };
   }
 
   const bucket = getBucketName();
@@ -174,13 +342,18 @@ export function resolveStorageTarget(): StorageTarget {
   ].filter((name): name is string => Boolean(name));
 
   if (bucket && missing.length === 0) {
-    return { driver: 'spaces', bucket };
+    return { driver: 'spaces', bucket, region: getSpacesRegion() };
   }
 
   warnOnce(
     `STORAGE_DRIVER=${driver} but ${missing.join(', ')} is not set: uploads are written to local disk (${getLocalPublicRoot()}) and served by this API. Configure the bucket for durable storage.`,
   );
-  return { driver: 'local' };
+  return {
+    driver: 'local',
+    reason: 'missing-config',
+    requestedDriver: driver,
+    missing,
+  };
 }
 
 /**
@@ -206,6 +379,15 @@ export async function storeObject(input: {
       }),
     );
     return buildPublicUrl(target.bucket, input.key);
+  }
+
+  const folders = getLocalUploadFolders();
+  if (!folders.some((folder) => input.key.startsWith(`${folder}/`))) {
+    // Se guarda igual, pero serveLocalUploads no publica esa carpeta y la URL
+    // daria 404: aviso para quien agregue un llamador sin sumar su carpeta.
+    warnOnce(
+      `Upload folder "${path.posix.dirname(input.key)}" is not served by serveLocalUploads (${folders.join(', ')}): its local URLs return 404. Add it to getLocalUploadFolders().`,
+    );
   }
 
   const localPath = path.join(getLocalPublicRoot(), ...input.key.split('/'));
@@ -263,21 +445,45 @@ export function setLocalUploadHeaders(res: Response, filePath: string): void {
  * para poder probar con helmet delante que las URLs que arma
  * buildLocalPublicUrl responden y que solo esta ruta relaja CORP. Llamar
  * despues de helmet(), para que setLocalUploadHeaders pise su header.
+ *
+ * Un static por carpeta de getLocalUploadFolders(), con su propio prefijo y
+ * raiz, y no uno sobre todo LOCAL_UPLOAD_DIR: si esa variable apunta mal solo
+ * quedan publicas esas subcarpetas. Las URLs no cambian:
+ * <prefijo>/<carpeta>/<archivo>, igual que la clave.
  */
 export function serveLocalUploads(
   app: Pick<NestExpressApplication, 'useStaticAssets'>,
 ): void {
   const { root, prefix } = getLocalUploadMount();
-  app.useStaticAssets(root, {
-    prefix,
-    index: false,
-    redirect: false,
-    fallthrough: true,
-    // Las claves son unicas (uuid o timestamp) y no se sobrescriben.
-    maxAge: '7d',
-    immutable: true,
-    setHeaders: setLocalUploadHeaders,
-  });
+  if (isUnsafeLocalUploadRoot(root)) {
+    // Sin tumbar el arranque: el resto del API sigue y el estado del sistema
+    // lo marca como error.
+    logger.error(
+      `LOCAL_UPLOAD_DIR (${root}) is the working directory or contains it: local uploads are NOT served, so the project files are not published. Point it to a dedicated folder.`,
+    );
+    return;
+  }
+
+  const base = prefix === '/' ? '' : prefix;
+  for (const folder of getLocalUploadFolders()) {
+    if (!isServableUploadFolder(folder)) {
+      logger.error(
+        `Upload folder "${folder}" (SPACES_UPLOAD_PREFIX) is not a plain relative path: it is not served.`,
+      );
+      continue;
+    }
+    app.useStaticAssets(path.join(root, ...folder.split('/')), {
+      prefix: `${base}/${folder}`,
+      index: false,
+      redirect: false,
+      fallthrough: true,
+      dotfiles: 'ignore',
+      // Las claves son unicas (uuid o timestamp) y no se sobrescriben.
+      maxAge: '7d',
+      immutable: true,
+      setHeaders: setLocalUploadHeaders,
+    });
+  }
 }
 
 const toWebp = async (buffer: Buffer): Promise<Buffer> => {
@@ -304,7 +510,7 @@ export async function processUploadedFiles(
   files: Express.Multer.File[],
   req: Request,
 ): Promise<UploadedFile[]> {
-  const uploadPrefix = process.env.SPACES_UPLOAD_PREFIX || 'evidences';
+  const uploadPrefix = getEvidenceUploadFolder();
 
   return Promise.all(
     files.map(async (file): Promise<UploadedFile> => {

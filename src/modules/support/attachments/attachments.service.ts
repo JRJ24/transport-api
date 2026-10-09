@@ -1,4 +1,8 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+} from '@nestjs/common';
 import type { Attachment } from '@generated/prisma/client';
 import type { Request } from 'express';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
@@ -17,6 +21,14 @@ export interface UploadedAttachment {
   attachment: Attachment | null;
 }
 
+interface AttachmentEntity {
+  entityType: string;
+  entityId: string;
+}
+
+/** Mismo mensaje en list() y upload(): las apps ya lo conocen. */
+const ENTITY_REQUIRED_MESSAGE = 'entityType and entityId are required';
+
 @Injectable()
 export class AttachmentsService {
   constructor(
@@ -24,18 +36,30 @@ export class AttachmentsService {
     private readonly access: EvidenceAccessService,
   ) {}
 
+  /**
+   * POST /attachments: registra metadata con un fileUrl arbitrario, sin subir
+   * nada. Solo staff (el controller ya lo restringe; esto es por si otro
+   * llamador lo reutiliza): un conductor podia colgar de su prueba la URL de
+   * cualquier imagen publica, incluida la foto de otro conductor, y con eso
+   * pasar assertDeliveryEvidenceReady sin haber fotografiado la entrega.
+   * Ninguna app de conductor o cliente lo usa; suben con /attachments/upload.
+   */
   async create(
     user: AuthenticatedUser,
     dto: CreateAttachmentDto,
   ): Promise<Attachment> {
-    const entityType = dto.entityType.trim();
-    const entityId = dto.entityId.trim();
-    await this.access.assertEntityAccess(user, entityType, entityId, 'write');
+    if (!this.access.isStaff(user)) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message:
+          'Only staff can register attachment metadata; upload the file instead',
+      });
+    }
 
     return this.prisma.attachment.create({
       data: {
-        entityType,
-        entityId,
+        entityType: dto.entityType.trim(),
+        entityId: dto.entityId.trim(),
         fileName: dto.fileName.trim(),
         fileUrl: dto.fileUrl.trim(),
         fileSize: dto.fileSize,
@@ -47,10 +71,9 @@ export class AttachmentsService {
   }
 
   /**
-   * POST /attachments/upload. Orden importante: primero autorizar y despues
-   * escribir en el storage, para que un 403 no deje archivos publicos
-   * huerfanos. Sin entityType+entityId solo se sube el archivo (attachment
-   * null), permitido a cualquier usuario autenticado como hasta ahora.
+   * POST /attachments/upload. Orden importante: primero validar la entidad y
+   * autorizar, despues escribir en el storage, para que un 400/403 no deje
+   * archivos publicos huerfanos.
    */
   async upload(
     user: AuthenticatedUser,
@@ -58,11 +81,15 @@ export class AttachmentsService {
     dto: UploadAttachmentsDto,
     req: Request,
   ): Promise<UploadedAttachment[]> {
-    const entityType = dto.entityType?.trim();
-    const entityId = dto.entityId?.trim();
+    const entity = this.resolveUploadEntity(user, dto);
 
-    if (entityType && entityId) {
-      await this.access.assertEntityAccess(user, entityType, entityId, 'write');
+    if (entity) {
+      await this.access.assertEntityAccess(
+        user,
+        entity.entityType,
+        entity.entityId,
+        'write',
+      );
     }
 
     if (!files || files.length === 0) {
@@ -70,7 +97,40 @@ export class AttachmentsService {
     }
 
     const stored = await processUploadedFiles(files, req);
-    return this.createFromUploadedFiles(user, stored, entityType, entityId);
+    return this.createFromUploadedFiles(user, stored, entity);
+  }
+
+  /**
+   * Entidad a la que se cuelgan los archivos subidos, ya recortada (Length(2,
+   * 80) del DTO deja pasar '  ', que recortado queda vacio).
+   * - Conductor o cliente: obligatoria. Sin ella el archivo quedaba publicado
+   *   sin dueno y sin pasar por ninguna verificacion de acceso.
+   * - Staff: puede subir solo el archivo (attachment null), como antes; pero
+   *   mandar solo uno de los dos campos es un error, no "sin entidad".
+   */
+  private resolveUploadEntity(
+    user: AuthenticatedUser,
+    dto: UploadAttachmentsDto,
+  ): AttachmentEntity | null {
+    const entityType = dto.entityType?.trim() ?? '';
+    const entityId = dto.entityId?.trim() ?? '';
+
+    if (entityType && entityId) {
+      return { entityType, entityId };
+    }
+
+    if (!this.access.isStaff(user)) {
+      throw this.entityRequired();
+    }
+
+    if (entityType || entityId) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'entityType and entityId must be sent together',
+      });
+    }
+
+    return null;
   }
 
   /**
@@ -80,29 +140,24 @@ export class AttachmentsService {
   private async createFromUploadedFiles(
     user: AuthenticatedUser,
     files: UploadedFile[],
-    entityType?: string,
-    entityId?: string,
+    entity: AttachmentEntity | null,
   ): Promise<UploadedAttachment[]> {
-    const normalizedEntityType = entityType?.trim();
-    const normalizedEntityId = entityId?.trim();
-
     return Promise.all(
       files.map(async (file) => {
-        const attachment =
-          normalizedEntityType && normalizedEntityId
-            ? await this.prisma.attachment.create({
-                data: {
-                  entityType: normalizedEntityType,
-                  entityId: normalizedEntityId,
-                  fileName: file.fileName,
-                  fileUrl: file.url,
-                  fileSize: file.size,
-                  mimeType: file.mimeType,
-                  uploadedBy: user.id,
-                  createdAt: new Date(),
-                },
-              })
-            : null;
+        const attachment = entity
+          ? await this.prisma.attachment.create({
+              data: {
+                entityType: entity.entityType,
+                entityId: entity.entityId,
+                fileName: file.fileName,
+                fileUrl: file.url,
+                fileSize: file.size,
+                mimeType: file.mimeType,
+                uploadedBy: user.id,
+                createdAt: new Date(),
+              },
+            })
+          : null;
 
         return { file, attachment };
       }),
@@ -130,10 +185,7 @@ export class AttachmentsService {
     const type = entityType?.trim();
     const id = entityId?.trim();
     if (!type || !id) {
-      throw new BadRequestException({
-        code: ERROR_CODES.BAD_REQUEST,
-        message: 'entityType and entityId are required',
-      });
+      throw this.entityRequired();
     }
 
     await this.access.assertEntityAccess(user, type, id, 'read');
@@ -141,6 +193,13 @@ export class AttachmentsService {
     return this.prisma.attachment.findMany({
       where: { entityType: type, entityId: id },
       orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  private entityRequired(): BadRequestException {
+    return new BadRequestException({
+      code: ERROR_CODES.BAD_REQUEST,
+      message: ENTITY_REQUIRED_MESSAGE,
     });
   }
 }

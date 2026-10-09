@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Delete,
@@ -9,7 +10,10 @@ import {
   UploadedFile,
   UseInterceptors,
 } from '@nestjs/common';
-import { FileInterceptor } from '@nestjs/platform-express';
+import {
+  FileInterceptor,
+  type MulterModuleOptions,
+} from '@nestjs/platform-express';
 import {
   ApiBearerAuth,
   ApiBody,
@@ -19,11 +23,13 @@ import {
 } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import {
   AccountService,
   AVATAR_MAX_BYTES,
+  AVATAR_MIME_TYPES,
   type EmailChangeResult,
 } from './account.service';
 import {
@@ -31,6 +37,42 @@ import {
   ConfirmEmailChangeDto,
   RequestEmailChangeDto,
 } from './dto/account.dto';
+
+/**
+ * Multer de POST users/me/avatar. Antes solo limitaba fileSize: busboy
+ * aceptaba sin tope campos de texto (1 MB cada uno, en RAM) y archivos con
+ * otro nombre de campo, y cualquier tipo llegaba al servicio ya leido en
+ * memoria. El endpoint solo necesita el archivo 'file' (app-customers manda
+ * solo eso), asi que:
+ * - files 1 y fields 0: un segundo archivo o cualquier campo de texto es 400.
+ * - parts 2: busboy avisa del tope de partes al ALCANZARLO (no al pasarlo) y
+ *   Multer lo trata como error, asi que con 1 se rechazaria la propia foto.
+ * - fileFilter con los mismos tipos y mensaje que AccountService.setAvatar,
+ *   para cortar antes de bufferizar un archivo que igual daria 400.
+ */
+export const AVATAR_UPLOAD_OPTIONS: MulterModuleOptions = {
+  limits: {
+    fileSize: AVATAR_MAX_BYTES,
+    files: 1,
+    fields: 0,
+    parts: 2,
+  },
+  fileFilter: (_req, file, cb) => {
+    if (AVATAR_MIME_TYPES.has(file.mimetype)) {
+      cb(null, true);
+      return;
+    }
+    // HttpException: el interceptor la deja pasar tal cual (400 con el sobre
+    // de error estandar) en vez de convertirla en un 500.
+    cb(
+      new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'The avatar must be a JPG, PNG or WebP image',
+      }),
+      false,
+    );
+  },
+};
 
 /** Self-service security for the signed-in user (customers, drivers, staff). */
 @ApiTags('account')
@@ -87,9 +129,7 @@ export class AccountController {
     },
   })
   @Post('users/me/avatar')
-  @UseInterceptors(
-    FileInterceptor('file', { limits: { fileSize: AVATAR_MAX_BYTES } }),
-  )
+  @UseInterceptors(FileInterceptor('file', AVATAR_UPLOAD_OPTIONS))
   uploadAvatar(
     @CurrentUser() user: AuthenticatedUser,
     @UploadedFile() file: Express.Multer.File | undefined,

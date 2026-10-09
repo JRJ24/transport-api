@@ -563,6 +563,10 @@ export class AssignmentsService {
       user.id,
       assignment.driverId,
     );
+    // Despues del commit y del aviso (que le llega por driver:{id}): si entro
+    // a order:{id} mientras estaba PENDING, seguia recibiendo la ubicacion y
+    // los estados del conductor al que se la den despues.
+    this.realtime.revokeOrderRoom(assignment.driverId, assignment.orderId);
 
     return assignment;
   }

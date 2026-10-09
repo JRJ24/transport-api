@@ -593,8 +593,34 @@ export class PricingService {
     });
   }
 
-  getQuote(id: string): Promise<PriceQuote | null> {
-    return this.prisma.priceQuote.findUnique({ where: { id } });
+  /**
+   * Una cotizacion lleva origen, destino y precio del cliente. Antes la leia
+   * cualquier cliente con el id. Staff sigue igual (null si no existe); el
+   * cliente solo ve las de su propio perfil, filtrado en la misma consulta, y
+   * recibe el mismo 403 exista o no la cotizacion, como en
+   * EvidenceAccessService, para no revelar que ids existen.
+   */
+  async getQuote(
+    user: AuthenticatedUser,
+    id: string,
+  ): Promise<PriceQuote | null> {
+    const isStaff = user.roles.some(
+      (role) => role === ROLES.ADMIN || role === ROLES.OPERATOR,
+    );
+    if (isStaff) {
+      return this.prisma.priceQuote.findUnique({ where: { id } });
+    }
+
+    const quote = await this.prisma.priceQuote.findFirst({
+      where: { id, customer: { userId: user.id } },
+    });
+    if (!quote) {
+      throw new ForbiddenException({
+        code: ERROR_CODES.FORBIDDEN,
+        message: 'You cannot access this quote',
+      });
+    }
+    return quote;
   }
 
   private findActiveRule(vehicleCategoryId: string): Promise<RateRule | null> {

@@ -30,6 +30,7 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { AssignmentsService } from '@/modules/operations/assignments/assignments.service';
+import { EVIDENCE_READ_ASSIGNMENT_STATUSES } from '@/modules/support/evidence-access/evidence-access.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import type { NotificationEvent } from '@/modules/support/notifications/templates/notification.templates';
 import { orderStatusLabel } from '@/modules/support/notifications/templates/notification.templates';
@@ -156,6 +157,34 @@ const DRIVER_RELEASE_STATUSES = new Set<STATUS_ORDERS>([
   STATUS_ORDERS.CANCELLED,
   STATUS_ORDERS.FAILED,
 ]);
+
+/**
+ * Asignaciones con las que un conductor LEE la orden completa (contacto del
+ * cliente, paradas, pagos) y su linea de tiempo. Antes bastaba cualquiera,
+ * incluida una REJECTED.
+ * - EVIDENCE_READ_ASSIGNMENT_STATUSES (PENDING, ACCEPTED, COMPLETED): la misma
+ *   regla que su evidencia y que la room order:{id}.
+ * - CANCELLED solo con la orden misma CANCELLED o FAILED: es la que deja
+ *   releaseOrderDrivers, y transport-driver recarga GET /orders/:id justo al
+ *   recibir order.status.changed de la cancelacion; tiene que ver la orden
+ *   cancelada, no un 403.
+ * - REJECTED nunca: ese conductor ya no responde por la orden y puede
+ *   llevarla otro.
+ */
+function driverReadableAssignment(
+  userId: string,
+): Prisma.OrderAssignmentWhereInput {
+  return {
+    driver: { userId },
+    OR: [
+      { assignmentStatus: { in: EVIDENCE_READ_ASSIGNMENT_STATUSES } },
+      {
+        assignmentStatus: ASSIGNMENT_STATUS.CANCELLED,
+        order: { status: { in: [...DRIVER_RELEASE_STATUSES] } },
+      },
+    ],
+  };
+}
 
 const SAFE_USER_SELECT = {
   id: true,
@@ -679,23 +708,20 @@ export class OrdersService {
     }
 
     if (this.isDriverOnly(user)) {
-      const driver = await this.prisma.driverProfile.findFirst({
-        where: { userId: user.id },
-        select: { id: true },
-      });
-
-      if (!driver) {
-        return [];
-      }
-
-      where.orderAssignments = { some: { driverId: driver.id } };
+      // Misma regla que GET /orders/:id (assertDriverCanAccessOrder): con
+      // cualquier asignacion bastaba, y el listado traia contacto del
+      // cliente, paradas y pagos de ordenes que el conductor rechazo. Sin
+      // perfil de conductor el filtro por relacion no encuentra nada, como el
+      // [] de antes. Las apps de conductor listan con /assignments/me.
+      where.orderAssignments = { some: driverReadableAssignment(user.id) };
     }
 
-    return this.prisma.transportOrder.findMany({
+    const orders = await this.prisma.transportOrder.findMany({
       where,
       include: ORDER_INCLUDE,
       orderBy: { createdAt: 'desc' },
     });
+    return orders.map((order) => this.scopeAssignmentsForViewer(user, order));
   }
 
   async findAvailableForDrivers(
@@ -749,7 +775,7 @@ export class OrdersService {
       return [];
     }
 
-    return this.prisma.transportOrder.findMany({
+    const orders = await this.prisma.transportOrder.findMany({
       where: {
         status: STATUS_ORDERS.REQUESTED,
         paymentStatus: { in: DISPATCHABLE_PAYMENT_STATUSES },
@@ -765,6 +791,9 @@ export class OrdersService {
       include: ORDER_INCLUDE,
       orderBy: { createdAt: 'desc' },
     });
+    // Una orden de vuelta en REQUESTED trae las asignaciones REJECTED o
+    // CANCELLED de otros conductores, con su email y telefono.
+    return orders.map((order) => this.scopeAssignmentsForViewer(user, order));
   }
 
   claim(
@@ -791,7 +820,7 @@ export class OrdersService {
     await this.assertCanReadOrder(user, order.customerId);
     await this.assertDriverCanAccessOrder(user, id);
 
-    return order;
+    return this.scopeAssignmentsForViewer(user, order);
   }
 
   async updateStatus(
@@ -822,6 +851,9 @@ export class OrdersService {
     // Conductores cuya asignacion se cierra en esta transaccion: ya no salen
     // como activos en la orden devuelta, pero su app debe enterarse.
     const closedForDriverIds: string[] = [];
+    // De esos, los que quedan CANCELLED (no el COMPLETED de una entrega):
+    // pierden la room order:{id}.
+    const releasedDriverIds: string[] = [];
     const order = await this.prisma.$transaction(async (tx) => {
       await tx.transportOrder.update({
         where: { id },
@@ -870,9 +902,10 @@ export class OrdersService {
       }
 
       if (DRIVER_RELEASE_STATUSES.has(dto.status)) {
-        closedForDriverIds.push(
+        releasedDriverIds.push(
           ...(await this.releaseOrderDrivers(tx, id, now)),
         );
+        closedForDriverIds.push(...releasedDriverIds);
       }
 
       return tx.transportOrder.findUniqueOrThrow({
@@ -893,6 +926,7 @@ export class OrdersService {
       changedAt: now.toISOString(),
       driverIds: [...this.activeDriverIds(order), ...closedForDriverIds],
     });
+    this.revokeOrderRooms(releasedDriverIds, id);
 
     void this.notifyOperators('ORDER_STATUS_CHANGED', order, dto.status).catch(
       (error: unknown) =>
@@ -907,7 +941,7 @@ export class OrdersService {
       ),
     );
 
-    return order;
+    return this.scopeAssignmentsForViewer(user, order);
   }
 
   /**
@@ -1130,6 +1164,7 @@ export class OrdersService {
       changedAt: now.toISOString(),
       driverIds: releasedDriverIds,
     });
+    this.revokeOrderRooms(releasedDriverIds, id);
     void this.notifyOperators('ORDER_CANCELLED', order).catch(
       (error: unknown) =>
         this.logger.error(
@@ -1147,11 +1182,66 @@ export class OrdersService {
     return order;
   }
 
-  listEvents(orderId: string) {
+  /**
+   * Linea de tiempo de la orden. Para cliente y conductor no se miraba de
+   * quien era la orden: cualquiera con un id veia los eventos (actor,
+   * descripcion, motivo de cancelacion, metadata) de ordenes ajenas. Ahora
+   * pasa por los mismos controles que GET /orders/:id.
+   *
+   * Una orden que no existe responde el mismo 403 que una ajena (convencion
+   * de EvidenceAccessService): con customerId null el control del cliente
+   * falla igual que con una orden de otro, y el del conductor no encuentra
+   * asignacion. Staff no consulta nada aparte y sigue recibiendo [].
+   */
+  async listEvents(user: AuthenticatedUser, orderId: string) {
+    if (this.isCustomerOnly(user) || this.isDriverOnly(user)) {
+      const order = await this.prisma.transportOrder.findUnique({
+        where: { id: orderId },
+        select: { customerId: true },
+      });
+      await this.assertCanReadOrder(user, order?.customerId ?? null);
+      await this.assertDriverCanAccessOrder(user, orderId);
+    }
+
     return this.prisma.orderEvent.findMany({
       where: { orderId },
       orderBy: { createdAt: 'asc' },
     });
+  }
+
+  /**
+   * Un conductor solo ve SU asignacion dentro de la orden. ORDER_INCLUDE trae
+   * todas, con email y telefono de cada conductor: el que la tomaba despues
+   * de un rechazo veia el contacto personal del anterior (y la bolsa de
+   * self-dispatch, el de todos los que la rechazaron). Ninguna app de
+   * conductor lee order.orderAssignments (usan /assignments/me); staff y el
+   * cliente siguen recibiendo todas.
+   */
+  private scopeAssignmentsForViewer<
+    T extends { orderAssignments: { driver: { userId: string } }[] },
+  >(user: AuthenticatedUser, order: T): T {
+    if (!this.isDriverOnly(user)) {
+      return order;
+    }
+    return {
+      ...order,
+      orderAssignments: order.orderAssignments.filter(
+        (row) => row.driver.userId === user.id,
+      ),
+    };
+  }
+
+  /**
+   * Saca de order:{id} a los conductores liberados (asignacion CANCELLED).
+   * Va despues de emitOrderStatusChanged: el aviso de la cancelacion les
+   * llega por driver:{id} y ya no necesitan la room. La orden es terminal,
+   * pero la room sigue recibiendo eventos de esa orden y la membresia no
+   * caduca sola; con la asignacion CANCELLED tampoco pasarian canViewOrder.
+   */
+  private revokeOrderRooms(driverIds: string[], orderId: string): void {
+    for (const driverId of new Set(driverIds)) {
+      this.realtime.revokeOrderRoom(driverId, orderId);
+    }
   }
 
   /**
@@ -1268,10 +1358,24 @@ export class OrdersService {
       .map((row) => row.driverId);
   }
 
+  /**
+   * Para cerrar como DELIVERED hace falta una prueba con foto de entrega y
+   * firma del receptor.
+   *
+   * La foto se reconocia solo por el nombre (imagen sin 'signature'): con una
+   * sola foto subida y registrada tambien como firma (signatureUrl = la URL
+   * de esa foto) la misma imagen contaba como las dos cosas. Ahora la foto no
+   * puede ser ninguno de los archivos usados como firma. Las dos apps de
+   * conductor suben foto y firma como archivos distintos en la misma subida,
+   * y processUploadedFiles le da a cada uno su propia URL (uuid en la clave,
+   * tambien a la firma PNG/SVG que se guarda como webp), asi que siguen
+   * pasando. Se mantiene el filtro por nombre: es el mismo que usan las apps
+   * (evidenceReady) para decidir que adjunto es la foto.
+   */
   private async assertDeliveryEvidenceReady(orderId: string): Promise<void> {
     const proofs = await this.prisma.deliveryProof.findMany({
       where: { orderId },
-      select: { id: true },
+      select: { id: true, signatures: { select: { signatureUrl: true } } },
     });
 
     if (proofs.length === 0) {
@@ -1281,24 +1385,32 @@ export class OrdersService {
       });
     }
 
-    const proofIds = proofs.map((proof) => proof.id);
-    const [photoAttachment, signature] = await Promise.all([
-      this.prisma.attachment.findFirst({
-        where: {
-          entityType: 'DeliveryProof',
-          entityId: { in: proofIds },
-          mimeType: { startsWith: 'image/' },
-          NOT: { fileName: { contains: 'signature', mode: 'insensitive' } },
-        },
-        select: { id: true },
-      }),
-      this.prisma.signature.findFirst({
-        where: { proofId: { in: proofIds } },
-        select: { id: true },
-      }),
-    ]);
+    const signatureUrls = [
+      ...new Set(
+        proofs.flatMap((proof) =>
+          proof.signatures.map((signature) => signature.signatureUrl),
+        ),
+      ),
+    ];
+    // Sin firma no hace falta buscar la foto.
+    const photoAttachment =
+      signatureUrls.length > 0
+        ? await this.prisma.attachment.findFirst({
+            where: {
+              entityType: 'DeliveryProof',
+              entityId: { in: proofs.map((proof) => proof.id) },
+              mimeType: { startsWith: 'image/' },
+              // NOT con lista: ninguna de las dos puede cumplirse.
+              NOT: [
+                { fileName: { contains: 'signature', mode: 'insensitive' } },
+                { fileUrl: { in: signatureUrls } },
+              ],
+            },
+            select: { id: true },
+          })
+        : null;
 
-    if (!photoAttachment || !signature) {
+    if (!photoAttachment) {
       throw new BadRequestException({
         code: ERROR_CODES.BAD_REQUEST,
         message:
@@ -1322,9 +1434,10 @@ export class OrdersService {
     return customer;
   }
 
+  /** customerId null: la orden no existe; responde como una orden ajena. */
   private async assertCanReadOrder(
     user: AuthenticatedUser,
-    customerId: string,
+    customerId: string | null,
   ): Promise<void> {
     if (!this.isCustomerOnly(user)) {
       return;
@@ -1358,7 +1471,14 @@ export class OrdersService {
     );
   }
 
-  /** A driver may only see/act on orders assigned to them. */
+  /**
+   * Un conductor solo lee la orden con una asignacion que todavia se lo
+   * permita (driverReadableAssignment). Antes bastaba cualquiera, incluida una
+   * REJECTED: quien rechazo la orden seguia viendo contacto del cliente,
+   * paradas y pagos mientras la llevaba otro. Una sola consulta, filtrando por
+   * la relacion, sin buscar antes el perfil. La usan findOne, listEvents y,
+   * antes de assertDriverHoldsOrder, updateStatus.
+   */
   private async assertDriverCanAccessOrder(
     user: AuthenticatedUser,
     orderId: string,
@@ -1367,14 +1487,10 @@ export class OrdersService {
       return;
     }
 
-    const driver = await this.prisma.driverProfile.findFirst({
-      where: { userId: user.id },
+    const assignment = await this.prisma.orderAssignment.findFirst({
+      where: { orderId, ...driverReadableAssignment(user.id) },
+      select: { id: true },
     });
-    const assignment = driver
-      ? await this.prisma.orderAssignment.findFirst({
-          where: { orderId, driverId: driver.id },
-        })
-      : null;
 
     if (!assignment) {
       throw new ForbiddenException({
@@ -1388,13 +1504,15 @@ export class OrdersService {
    * Un conductor solo cambia el estado de la orden que lleva (o que llevo
    * hasta cerrarla).
    *
-   * assertDriverCanAccessOrder acepta cualquier asignacion (sirve para leer el
-   * historial), asi que uno que la rechazo y vio como se la daban a otro podia
-   * marcarla FAILED o DELIVERED, y con la liberacion de releaseOrderDrivers
-   * eso cancelaba la asignacion del conductor que de verdad la lleva.
-   * COMPLETED y CANCELLED quedan cuando ese mismo conductor cerro la orden (o
-   * staff cerro su asignacion): hacen falta para el reintento del mismo
-   * estado que manda la cola offline de la app.
+   * assertDriverCanAccessOrder es la regla de LECTURA (deja pasar una
+   * PENDING, que aun no acepto), y antes aceptaba cualquier asignacion: uno
+   * que la rechazo y vio como se la daban a otro podia marcarla FAILED o
+   * DELIVERED, y con la liberacion de releaseOrderDrivers eso cancelaba la
+   * asignacion del conductor que de verdad la lleva. COMPLETED y CANCELLED
+   * quedan cuando ese mismo conductor cerro la orden (o staff cerro su
+   * asignacion): hacen falta para el reintento del mismo estado que manda la
+   * cola offline de la app. updateStatus pide las dos: una CANCELLED solo
+   * pasa la de lectura con la orden ya CANCELLED o FAILED.
    */
   private async assertDriverHoldsOrder(
     user: AuthenticatedUser,

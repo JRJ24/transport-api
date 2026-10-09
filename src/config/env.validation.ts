@@ -2,6 +2,15 @@ import { z } from 'zod';
 
 const DURATION_PATTERN = /^\d+(ms|s|m|h|d)$/;
 
+const isHttpUrl = (value: string): boolean => {
+  try {
+    const { protocol } = new URL(value);
+    return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+};
+
 export const envSchema = z
   .object({
     NODE_ENV: z
@@ -191,6 +200,20 @@ export const envSchema = z
     MAX_UPLOAD_MB: z.coerce.number().int().positive().default(50),
     LOCAL_UPLOAD_DIR: z.string().optional(),
     LOCAL_UPLOAD_PUBLIC_URL: z.string().optional(),
+    /**
+     * URL publica de este API (solo se usa el origen). Con uploads en disco y
+     * sin LOCAL_UPLOAD_PUBLIC_URL, la URL del archivo sale de aqui y no del
+     * Host/X-Forwarded-Host de la peticion, que manda el cliente. Opcional:
+     * sin ella se usa el origen de PAYMENT_CALLBACK_BASE_URL, asi que ningun
+     * despliegue actual tiene que definirla. Vacia = no definida.
+     */
+    PUBLIC_API_BASE_URL: z
+      .string()
+      .trim()
+      .refine((value) => value === '' || isHttpUrl(value), {
+        message: 'Must be an http(s) URL, e.g. https://api.larutard.com.do',
+      })
+      .optional(),
   })
   .superRefine((value, ctx) => {
     // Production without a maps key used to boot happily and then serve mock

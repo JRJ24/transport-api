@@ -1,6 +1,11 @@
 import { Inject, Injectable } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
-import { notificationConfig, paymentConfig, storageConfig } from '@/config';
+import {
+  getUnservedUploadFolders,
+  isUnsafeLocalUploadRoot,
+  resolveStorageTarget,
+} from '@/common/middlewares/processFile';
+import { notificationConfig, paymentConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
 import { RedisService } from '@/database/redis.service';
 import { googleMapsConfig } from '@/integrations/google-maps/google-maps.config';
@@ -25,8 +30,6 @@ export class SystemStatusService {
     private readonly redis: RedisService,
     @Inject(googleMapsConfig.KEY)
     private readonly maps: ConfigType<typeof googleMapsConfig>,
-    @Inject(storageConfig.KEY)
-    private readonly storage: ConfigType<typeof storageConfig>,
     @Inject(paymentConfig.KEY)
     private readonly payments: ConfigType<typeof paymentConfig>,
     @Inject(notificationConfig.KEY)
@@ -129,29 +132,53 @@ export class SystemStatusService {
         };
   }
 
+  /**
+   * El destino real de storeObject (resolveStorageTarget), no solo la config:
+   * con bucket pero sin claves los archivos iban a disco y aqui salia OK.
+   */
   private storageCheck(): SystemCheck {
+    const id = 'storage';
     const label = 'Almacenamiento de evidencias';
-    if (this.storage.driver === 'local') {
+    const target = resolveStorageTarget();
+    if (target.driver === 'spaces') {
       return {
-        id: 'storage',
+        id,
         label,
-        state: 'warning',
-        detail: 'Disco local del servidor (no recomendado en producción)',
+        state: 'ok',
+        detail: `Bucket ${target.bucket} (${target.region})`,
       };
     }
-    return this.storage.bucket
-      ? {
-          id: 'storage',
-          label,
-          state: 'ok',
-          detail: `Bucket ${this.storage.bucket} (${this.storage.region})`,
-        }
-      : {
-          id: 'storage',
-          label,
-          state: 'error',
-          detail: 'Falta el bucket de Spaces/S3',
-        };
+
+    // Se pidio Spaces/S3 y falta configuracion: error, como antes sin bucket,
+    // aunque los archivos se sigan guardando en disco.
+    const fallback = target.reason === 'missing-config';
+    const detail = fallback
+      ? `Falta ${target.missing.join(', ')}: las evidencias se guardan en el disco local del servidor`
+      : 'Disco local del servidor (no recomendado en producción)';
+
+    // serveLocalUploads no monta esa carpeta: se guardan pero dan 404.
+    if (isUnsafeLocalUploadRoot()) {
+      return {
+        id,
+        label,
+        state: 'error',
+        detail: `${detail}. No se publican: LOCAL_UPLOAD_DIR es la carpeta del proyecto o la contiene`,
+      };
+    }
+
+    // Tampoco monta una carpeta que no es una ruta relativa simple: esas
+    // evidencias dan 404 aunque el resto funcione.
+    const unserved = getUnservedUploadFolders();
+    if (unserved.length > 0) {
+      return {
+        id,
+        label,
+        state: 'error',
+        detail: `${detail}. No se publica ${unserved.join(', ')}: SPACES_UPLOAD_PREFIX no es una ruta relativa simple`,
+      };
+    }
+
+    return { id, label, state: fallback ? 'error' : 'warning', detail };
   }
 
   private paymentsCheck(): SystemCheck {

@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   ForbiddenException,
   Injectable,
@@ -20,10 +21,22 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
+import { EvidenceAccessService } from '../evidence-access/evidence-access.service';
 import type { CreateIncidentCommentDto } from './dto/create-incident-comment.dto';
 import type { CreateIncidentDto } from './dto/create-incident.dto';
 import type { IncidentQueryDto } from './dto/incident-query.dto';
 import type { UpdateIncidentStatusDto } from './dto/update-incident-status.dto';
+
+/**
+ * Mensajes de los 403. Las apps muestran el mensaje tal cual en un toast, por
+ * eso hablan de incidencias y no del "evidence" generico de
+ * EvidenceAccessService (el codigo FORBIDDEN es el mismo).
+ */
+export const INCIDENT_LIST_DENIED =
+  'You cannot access the incidents of this order';
+export const INCIDENT_REPORT_DENIED =
+  'You cannot report incidents for this order';
+export const INCIDENT_COMMENT_DENIED = 'You cannot comment on this incident';
 
 @Injectable()
 export class IncidentsService {
@@ -33,9 +46,30 @@ export class IncidentsService {
     private readonly prisma: PrismaService,
     private readonly realtime: RealtimeService,
     private readonly notifications: NotificationDispatcherService,
+    private readonly access: EvidenceAccessService,
   ) {}
 
-  list(query: IncidentQueryDto): Promise<Incident[]> {
+  async list(
+    user: AuthenticatedUser,
+    query: IncidentQueryDto,
+  ): Promise<Incident[]> {
+    // El portal (staff) filtra libremente. Conductor y cliente solo ven las
+    // incidencias de una orden suya: sin orderId el listado devolvia las de
+    // todas las ordenes (descripcion, ubicacion, respuestas de la torre y el
+    // email de quien reporto). Lectura: mismo alcance que ver la evidencia.
+    const staff = this.access.isStaff(user);
+    if (!staff) {
+      if (!query.orderId) {
+        throw new BadRequestException({
+          code: ERROR_CODES.BAD_REQUEST,
+          message: 'orderId is required',
+        });
+      }
+      await this.access.assertOrderAccess(user, query.orderId, {
+        message: INCIDENT_LIST_DENIED,
+      });
+    }
+
     const where: Prisma.IncidentWhereInput = {
       ...(query.orderId && { orderId: query.orderId }),
       ...(query.incidentType && { incidentType: query.incidentType }),
@@ -67,7 +101,9 @@ export class IncidentsService {
       include: {
         incidentsComments: true,
         order: { select: { id: true, orderCode: true, status: true } },
-        user: { select: { id: true, fullName: true, email: true } },
+        // El email de quien reporto solo lo necesita el portal. Al cliente le
+        // daria el email del conductor (y al reves), y ninguna app lo usa.
+        user: { select: { id: true, fullName: true, email: staff } },
       },
       orderBy: { reportedAt: 'desc' },
     });
@@ -77,7 +113,7 @@ export class IncidentsService {
     user: AuthenticatedUser,
     dto: CreateIncidentDto,
   ): Promise<Incident> {
-    await this.assertCanReportOrder(user, dto.orderId);
+    await this.assertCanWriteOrder(user, dto.orderId, INCIDENT_REPORT_DENIED);
 
     const incident = await this.prisma.incident.create({
       data: {
@@ -212,11 +248,30 @@ export class IncidentsService {
     return incident;
   }
 
-  addComment(
+  async addComment(
     user: AuthenticatedUser,
     incidentId: string,
     dto: CreateIncidentCommentDto,
   ): Promise<IncidentComment> {
+    // Staff (portal / torre de control) comenta cualquier incidencia, como
+    // antes. Conductor y cliente antes podian colgar comentarios en
+    // incidencias de ordenes ajenas: el insert no miraba de quien era.
+    if (!this.access.isStaff(user)) {
+      const incident = await this.prisma.incident.findUnique({
+        where: { id: incidentId },
+        select: { orderId: true },
+      });
+      // Mismo 403 exista o no la incidencia, para no revelar ids ajenos.
+      if (!incident) {
+        throw this.denied(INCIDENT_COMMENT_DENIED);
+      }
+      await this.assertCanWriteOrder(
+        user,
+        incident.orderId,
+        INCIDENT_COMMENT_DENIED,
+      );
+    }
+
     return this.prisma.incidentComment.create({
       data: {
         incidentId,
@@ -226,60 +281,35 @@ export class IncidentsService {
     });
   }
 
-  private async assertCanReportOrder(
+  /**
+   * Escribir en las incidencias de una orden (reportar o comentar). Es la
+   * regla de la evidencia en modo escritura: staff libre; conductor solo con
+   * una asignacion que lo deje escribir evidencia (no basta una
+   * REJECTED/CANCELLED, ni una oferta que todavia no acepto); cliente solo en
+   * su propia orden, que es lo que usa IncidentsPanel en app-customers. Antes
+   * al conductor le bastaba cualquier asignacion, y al cliente una orden
+   * inexistente le daba 404 en vez de 403 (revelaba que ids existen).
+   *
+   * assertOrderAccess con allowCustomer explicito y no assertEntityAccess
+   * ('ORDER', 'write'): ese camino es el de los adjuntos, donde el cliente ya
+   * no puede subir archivos. Reportar y comentar si son del cliente. El 403
+   * sale con el mensaje de incidencias (INCIDENT_*_DENIED); cualquier otro
+   * error sube tal cual.
+   */
+  private assertCanWriteOrder(
     user: AuthenticatedUser,
     orderId: string,
+    message: string,
   ): Promise<void> {
-    if (
-      user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
-    ) {
-      return;
-    }
-
-    if (user.roles.includes(ROLES.DRIVER)) {
-      const driver = await this.prisma.driverProfile.findFirst({
-        where: { userId: user.id },
-        select: { id: true },
-      });
-      const assignment = driver
-        ? await this.prisma.orderAssignment.findFirst({
-            where: { orderId, driverId: driver.id },
-            select: { id: true },
-          })
-        : null;
-
-      if (assignment) {
-        return;
-      }
-
-      throw new ForbiddenException({
-        code: ERROR_CODES.FORBIDDEN,
-        message: 'You cannot report incidents for an unassigned order',
-      });
-    }
-
-    if (user.roles.includes(ROLES.CUSTOMER)) {
-      const order = await this.prisma.transportOrder.findUnique({
-        where: { id: orderId },
-        select: { customer: { select: { userId: true } } },
-      });
-
-      if (!order) {
-        throw new NotFoundException({
-          code: ERROR_CODES.RESOURCE_NOT_FOUND,
-          message: 'Order not found',
-        });
-      }
-
-      if (order.customer.userId === user.id) {
-        return;
-      }
-    }
-
-    throw new ForbiddenException({
-      code: ERROR_CODES.FORBIDDEN,
-      message: 'You cannot report incidents for this order',
+    return this.access.assertOrderAccess(user, orderId, {
+      mode: 'write',
+      allowCustomer: true,
+      message,
     });
+  }
+
+  private denied(message: string): ForbiddenException {
+    return new ForbiddenException({ code: ERROR_CODES.FORBIDDEN, message });
   }
 
   private async notifyOperators(
