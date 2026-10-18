@@ -156,6 +156,8 @@ export const envSchema = z
     MATCHING_MANUAL_ENFORCE: z.enum(['off', 'on']).default('off'),
     MATCHING_SWEEP_MS: z.coerce.number().int().min(2000).default(10_000),
     MATCHING_RETRY_COOLDOWN_SEC: z.coerce.number().int().min(5).default(60),
+    // 0 = settings reload only on write (lets Neon scale to zero).
+    RUNTIME_SETTINGS_REFRESH_MS: z.coerce.number().int().min(0).default(0),
 
     // ── Demand multiplier (H3 supply/demand) ────────────────────────────────
     DEMAND_PRICING: z.enum(['off', 'shadow', 'on']).default('off'),

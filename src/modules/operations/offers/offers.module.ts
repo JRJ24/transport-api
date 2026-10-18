@@ -1,4 +1,5 @@
 import { BullModule } from '@nestjs/bullmq';
+import { APP_INTERCEPTOR } from '@nestjs/core';
 import {
   Global,
   Module,
@@ -14,6 +15,7 @@ import { MATCHING_QUEUE, MATCHING_QUEUE_ENABLED } from './offer.queue';
 import { OfferSchedulerService } from './offer-scheduler.service';
 import { OffersController } from './offers.controller';
 import { OffersService } from './offers.service';
+import { SweepArmInterceptor } from './sweep-arm.interceptor';
 
 // BullModule.forRoot is registered by NotificationsModule whenever REDIS_URL
 // is set, so this queue shares that connection.
@@ -38,6 +40,10 @@ const queueProviders: Provider[] = MATCHING_QUEUE_ENABLED
     OffersService,
     OfferSchedulerService,
     DispatchTriggerService,
+    // Re-arms the dispatch sweep on HTTP activity (see SweepArmInterceptor).
+    ...(MATCHING_QUEUE_ENABLED
+      ? [{ provide: APP_INTERCEPTOR, useClass: SweepArmInterceptor }]
+      : []),
     ...queueProviders,
   ],
   exports: [OffersService, DispatchTriggerService],

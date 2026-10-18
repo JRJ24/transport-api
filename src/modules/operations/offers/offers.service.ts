@@ -120,13 +120,101 @@ export class OffersService {
    * so it is also the retry path for orders nobody could take.
    */
   async sweep(now = new Date()): Promise<void> {
-    await this.expireDue(now);
-    await this.cancelStale();
-
-    if (!this.autoEnabled) {
+    // Unarmed = nothing to do since the last check: no query at all, so an
+    // idle API lets Neon scale to zero.
+    if (!(await this.scheduler.isArmed())) {
       return;
     }
 
+    await this.expireDue(now);
+    await this.cancelStale();
+
+    if (this.autoEnabled) {
+      await this.dispatchWaiting(now);
+    }
+
+    await this.settleSweep(now);
+  }
+
+  /** The DISPATCH_WAKE_JOB: a scheduled order entered its dispatch window. */
+  async wakeSweep(): Promise<void> {
+    await this.scheduler.arm();
+  }
+
+  /**
+   * Keeps the sweep armed only while the database shows work: a pending
+   * offer (expiry/stale safety net) or, in auto mode, an order to dispatch
+   * now (the retry path when no driver took it). A scheduled order further
+   * ahead gets a delayed wake-up instead of a query every tick.
+   */
+  private async settleSweep(now: Date): Promise<void> {
+    const pending = await this.prisma.driverOffer.count({
+      where: { status: OFFER_STATUS.PENDING },
+    });
+    if (pending > 0) {
+      return;
+    }
+
+    if (this.autoEnabled) {
+      const dueNow = await this.prisma.transportOrder.findFirst({
+        where: {
+          ...this.waitingOrderWhere(),
+          OR: this.dueNowFilter(now),
+        },
+        select: { id: true },
+      });
+      if (dueNow) {
+        return;
+      }
+
+      const nextScheduled = await this.prisma.transportOrder.findFirst({
+        where: {
+          ...this.waitingOrderWhere(),
+          serviceType: SERVICE_TYPE.SCHEDULED,
+          scheduleAt: { gt: new Date(now.getTime() + SCHEDULED_LEAD_MS) },
+        },
+        select: { scheduleAt: true },
+        orderBy: { scheduleAt: 'asc' },
+      });
+      if (nextScheduled?.scheduleAt) {
+        await this.scheduler.scheduleWake(
+          new Date(nextScheduled.scheduleAt.getTime() - SCHEDULED_LEAD_MS),
+        );
+      }
+    }
+
+    await this.scheduler.disarm();
+  }
+
+  /** Paid, driverless orders with no open offer. */
+  private waitingOrderWhere() {
+    return {
+      status: STATUS_ORDERS.REQUESTED,
+      paymentStatus: { in: DISPATCHABLE_PAYMENT_STATUSES },
+      orderAssignments: {
+        none: {
+          assignmentStatus: {
+            in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
+          },
+        },
+      },
+      driverOffers: { none: { status: OFFER_STATUS.PENDING } },
+    };
+  }
+
+  /** Immediate orders, and scheduled ones already inside the lead window. */
+  private dueNowFilter(now: Date) {
+    return [
+      { serviceType: SERVICE_TYPE.INMEDIATE },
+      {
+        serviceType: SERVICE_TYPE.SCHEDULED,
+        scheduleAt: { lte: new Date(now.getTime() + SCHEDULED_LEAD_MS) },
+      },
+    ];
+  }
+
+  /** Auto mode: open an offer for every order waiting for a driver. */
+  private async dispatchWaiting(now: Date): Promise<void> {
     // An order left in ASSIGNING_DRIVER without an open offer (crash between
     // two steps, lost job) goes back to the queue instead of hanging there.
     await this.prisma.transportOrder.updateMany({
@@ -139,23 +227,8 @@ export class OffersService {
 
     const orders = await this.prisma.transportOrder.findMany({
       where: {
-        status: STATUS_ORDERS.REQUESTED,
-        paymentStatus: { in: DISPATCHABLE_PAYMENT_STATUSES },
-        orderAssignments: {
-          none: {
-            assignmentStatus: {
-              in: [ASSIGNMENT_STATUS.PENDING, ASSIGNMENT_STATUS.ACCEPTED],
-            },
-          },
-        },
-        driverOffers: { none: { status: OFFER_STATUS.PENDING } },
-        OR: [
-          { serviceType: SERVICE_TYPE.INMEDIATE },
-          {
-            serviceType: SERVICE_TYPE.SCHEDULED,
-            scheduleAt: { lte: new Date(now.getTime() + SCHEDULED_LEAD_MS) },
-          },
-        ],
+        ...this.waitingOrderWhere(),
+        OR: this.dueNowFilter(now),
       },
       select: { id: true },
       orderBy: { createdAt: 'asc' },
@@ -497,6 +570,8 @@ export class OffersService {
    * so it re-reads the order rather than trusting the caller.
    */
   async onOrderDispatchable(orderId: string): Promise<void> {
+    // A paid order is work: if no driver takes it now, the sweep retries.
+    await this.scheduler.arm();
     const order = await this.prisma.transportOrder.findUnique({
       where: { id: orderId },
       select: { status: true, paymentStatus: true },
