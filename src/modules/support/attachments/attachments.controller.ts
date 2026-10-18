@@ -25,6 +25,7 @@ import {
   AttachmentsService,
   type UploadedAttachment,
 } from './attachments.service';
+import { AttachmentQueryDto } from './dto/attachment-query.dto';
 import { CreateAttachmentDto } from './dto/create-attachment.dto';
 import { UploadAttachmentsDto } from './dto/upload-attachments.dto';
 
@@ -39,14 +40,16 @@ export class AttachmentsController {
   @Get()
   list(
     @CurrentUser() user: AuthenticatedUser,
-    @Query('entityType') entityType?: string,
-    @Query('entityId') entityId?: string,
+    @Query() query: AttachmentQueryDto,
   ): Promise<Attachment[]> {
-    return this.service.list(user, entityType, entityId);
+    return this.service.list(user, query.entityType, query.entityId);
   }
 
-  @ApiOperation({ summary: 'Create attachment metadata' })
-  @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
+  // Solo staff: con un fileUrl arbitrario un conductor cerraba la entrega sin
+  // subir nada, o con la foto publica de otro conductor (ver
+  // AttachmentsService.create). Conductores y clientes usan /upload.
+  @ApiOperation({ summary: 'Create attachment metadata (staff only)' })
+  @Roles(ROLES.ADMIN, ROLES.OPERATOR)
   @Post()
   create(
     @CurrentUser() user: AuthenticatedUser,
@@ -60,7 +63,8 @@ export class AttachmentsController {
   // rol el multipart ni se lee. Acepta cualquier nombre de campo, como el
   // multer.any() anterior; las apps usan 'files'.
   @ApiOperation({
-    summary: 'Upload files and optionally attach them to an entity',
+    summary:
+      'Upload files attached to an entity (entityType + entityId; only staff may omit them)',
   })
   @ApiConsumes('multipart/form-data')
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)

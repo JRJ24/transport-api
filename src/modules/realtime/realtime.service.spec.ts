@@ -1,4 +1,5 @@
 import type { HttpAdapterHost } from '@nestjs/core';
+import { ASSIGNMENT_STATUS } from '@generated/prisma/enums';
 import type { JwtService } from '@nestjs/jwt';
 import type { Socket } from 'socket.io';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
@@ -165,9 +166,49 @@ describe('RealtimeService.handleConnection', () => {
     // El perfil se consulta una vez por conexion, no una por orden.
     expect(prisma.driverProfile.findFirst).toHaveBeenCalledTimes(1);
     expect(prisma.orderAssignment.findFirst).toHaveBeenCalledWith({
-      where: { orderId: 'order-1', driverId: 'd1' },
+      where: {
+        orderId: 'order-1',
+        driverId: 'd1',
+        assignmentStatus: {
+          in: [
+            ASSIGNMENT_STATUS.PENDING,
+            ASSIGNMENT_STATUS.ACCEPTED,
+            ASSIGNMENT_STATUS.COMPLETED,
+          ],
+        },
+      },
       select: { id: true },
     });
+  });
+
+  it('keeps a driver who no longer holds the order out of its room', async () => {
+    // Solo tiene una asignacion REJECTED o CANCELLED: el filtro no la encuentra.
+    const prisma = {
+      driverProfile: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'd1' }),
+      },
+      orderAssignment: { findFirst: jest.fn().mockResolvedValue(null) },
+    };
+    const { service } = build(prisma);
+    const { socket, handlers } = fakeSocket(driverUser);
+
+    connect(service, socket);
+    await handlers.get('tracking:join-order')?.({ orderId: 'order-1' });
+    await flush();
+
+    const where = (
+      prisma.orderAssignment.findFirst.mock.calls[0] as [
+        { where: { assignmentStatus: { in: string[] } } },
+      ]
+    )[0].where;
+    expect(where.assignmentStatus.in).not.toContain(ASSIGNMENT_STATUS.REJECTED);
+    expect(where.assignmentStatus.in).not.toContain(
+      ASSIGNMENT_STATUS.CANCELLED,
+    );
+    expect(socket.emit).toHaveBeenCalledWith('tracking:error', {
+      message: 'Not authorized to watch this order',
+    });
+    expect(socket.join).not.toHaveBeenCalledWith('order:order-1');
   });
 
   it('reports a failed join instead of rejecting inside the listener', async () => {

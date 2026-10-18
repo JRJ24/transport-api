@@ -16,6 +16,7 @@ import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { CreateIncidentCommentDto } from './dto/create-incident-comment.dto';
 import { CreateIncidentDto } from './dto/create-incident.dto';
+import { EscalateIncidentDto } from './dto/escalate-incident.dto';
 import { IncidentQueryDto } from './dto/incident-query.dto';
 import { UpdateIncidentStatusDto } from './dto/update-incident-status.dto';
 import { IncidentsService } from './incidents.service';
@@ -29,8 +30,13 @@ export class IncidentsController {
   @ApiOperation({ summary: 'List incidents' })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER, ROLES.DRIVER)
   @Get()
-  list(@Query() query: IncidentQueryDto): Promise<Incident[]> {
-    return this.service.list(query);
+  list(
+    @CurrentUser() user: AuthenticatedUser,
+    @Query() query: IncidentQueryDto,
+  ): Promise<Incident[]> {
+    // El usuario decide el alcance: staff ve todo, conductor y cliente solo
+    // las incidencias de una orden suya (ver IncidentsService.list).
+    return this.service.list(user, query);
   }
 
   @ApiOperation({ summary: 'Create incident' })
@@ -59,9 +65,11 @@ export class IncidentsController {
   escalate(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: { reason?: string },
+    @Body() dto: EscalateIncidentDto,
   ): Promise<Incident> {
-    return this.service.escalate(user, id, body?.reason);
+    // Con clase el ValidationPipe rechaza (400) un reason que no sea texto,
+    // en vez de dejarlo romper en el servicio (500).
+    return this.service.escalate(user, id, dto.reason);
   }
 
   @ApiOperation({ summary: 'Add incident comment' })

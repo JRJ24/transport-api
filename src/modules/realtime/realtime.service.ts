@@ -29,6 +29,19 @@ import { RuntimeSettingsService } from '@/modules/administration/settings/runtim
 /** Perfil del conductor de una conexion, consultado una vez y compartido. */
 type DriverLookup = () => Promise<{ id: string } | null>;
 
+/**
+ * Asignaciones que dejan a un conductor entrar a order:{id}. REJECTED y
+ * CANCELLED no: ese conductor ya no lleva la orden, y sus cambios le llegan
+ * por driver:{id} cuando lo incluyen en driverIds. Esto solo se mira al
+ * entrar; quien ya estaba dentro sale con revokeOrderRoom cuando su
+ * asignacion se cierra.
+ */
+const WATCHABLE_ASSIGNMENT_STATUSES: ASSIGNMENT_STATUS[] = [
+  ASSIGNMENT_STATUS.PENDING,
+  ASSIGNMENT_STATUS.ACCEPTED,
+  ASSIGNMENT_STATUS.COMPLETED,
+];
+
 interface TrackingLocationPayload {
   driverId?: string;
   orderId: string;
@@ -150,6 +163,25 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       .to([`order:${event.orderId}`, ...driverRooms])
       .emit('order.status.changed', event);
     this.io.to('tracking:operations').emit('order.status.changed', event);
+  }
+
+  /**
+   * Saca de order:{orderId} todas las conexiones del conductor.
+   *
+   * canViewOrder solo se evalua en tracking:join-order: un conductor que entro
+   * con la asignacion PENDING y despues la rechazo (o se la cancelaron) seguia
+   * en la room y recibia la ubicacion en vivo y los cambios de estado del
+   * conductor siguiente. Se llama despues del commit y despues de emitir el
+   * order.status.changed que lo avisa: ese evento le llega igual por
+   * driver:{id}. Va por driver:{id} porque todo socket de conductor que entra a
+   * una orden esta en esa room (joinDriverRooms al conectar, y join-order la
+   * asegura). Sin io (no hay servidor HTTP, p. ej. en tests) no hay rooms.
+   */
+  revokeOrderRoom(driverId: string, orderId: string): void {
+    if (!driverId || !orderId) {
+      return;
+    }
+    this.io?.in(`driver:${driverId}`).socketsLeave(`order:${orderId}`);
   }
 
   /** Broadcasts a newly created order to the TMS operations room. */
@@ -324,6 +356,27 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  /**
+   * revokeOrderRoom llega a las conexiones del conductor por driver:{id}. Si
+   * la consulta del perfil fallo al conectar, joinDriverRooms no la unio, pero
+   * join-order vuelve a consultar (el memo no guarda errores) y podia meterla
+   * en order:{id} fuera del alcance de la revocacion. Unirla aqui cierra ese
+   * hueco; con el perfil ya en memoria no cuesta otra consulta.
+   */
+  private async ensureDriverRoom(
+    socket: Socket,
+    user: AuthenticatedUser,
+    driverOf: DriverLookup,
+  ): Promise<void> {
+    if (!user.roles.includes(ROLES.DRIVER)) {
+      return;
+    }
+    const driver = await driverOf();
+    if (driver) {
+      await socket.join(`driver:${driver.id}`);
+    }
+  }
+
   private registerSocketHandlers(
     socket: Socket,
     user: AuthenticatedUser,
@@ -351,6 +404,12 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
           });
           return;
         }
+        // Como en joinDriverRooms: unir un socket ya cerrado deja su id
+        // colgado en las rooms del adapter.
+        if (!socket.connected) {
+          return;
+        }
+        await this.ensureDriverRoom(socket, user, driverOf);
         await socket.join(`order:${payload.orderId}`);
       } catch (error) {
         this.logger.error(
@@ -572,8 +631,17 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       if (!driver) {
         return false;
       }
+      // Con cualquier asignacion bastaba: quien rechazo la orden podia seguir
+      // en su room y ver la ubicacion en vivo del conductor que la tomo
+      // despues. Misma regla que EVIDENCE_READ_ASSIGNMENT_STATUSES
+      // (EvidenceAccessService); a quien ya estaba dentro lo saca
+      // revokeOrderRoom.
       const assignment = await this.prisma.orderAssignment.findFirst({
-        where: { orderId, driverId: driver.id },
+        where: {
+          orderId,
+          driverId: driver.id,
+          assignmentStatus: { in: WATCHABLE_ASSIGNMENT_STATUSES },
+        },
         select: { id: true },
       });
       if (assignment) {

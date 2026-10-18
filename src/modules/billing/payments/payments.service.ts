@@ -85,6 +85,16 @@ type PaymentWithOrder = Payment & {
   paymentsTransactions?: PaymentTransaction[];
 };
 
+/**
+ * Staff (ADMIN/OPERATOR) opera pagos de cualquier orden. Cualquier otro
+ * usuario, tenga los roles que tenga, solo los de sus propias ordenes.
+ */
+function isStaff(user: AuthenticatedUser): boolean {
+  return user.roles.some(
+    (role) => role === ROLES.ADMIN || role === ROLES.OPERATOR,
+  );
+}
+
 export interface CreatePaymentResult {
   payment: Payment;
   transaction: PaymentTransaction;
@@ -201,11 +211,10 @@ export class PaymentsService {
       });
     }
 
-    if (
-      user?.roles.length === 1 &&
-      user.roles[0] === ROLES.CUSTOMER &&
-      order.customer.user.id !== user.id
-    ) {
+    // Antes solo se comprobaba si el usuario tenia exactamente un rol
+    // CUSTOMER: uno con CUSTOMER+DRIVER pasaba sin ser el dueno. Ahora
+    // cualquiera que no sea staff tiene que ser el cliente de la orden.
+    if (user && !isStaff(user) && order.customer.user.id !== user.id) {
       throw new ForbiddenException({
         code: ERROR_CODES.FORBIDDEN,
         message: 'You cannot create payments for another customer order',
@@ -359,11 +368,10 @@ export class PaymentsService {
       });
     }
 
-    if (
-      user.roles.length === 1 &&
-      user.roles[0] === ROLES.CUSTOMER &&
-      order.customer.user.id !== user.id
-    ) {
+    // Mismo hueco que en create(): con CUSTOMER+DRIVER se autorizaba la orden
+    // de otro cliente contra el credito de ESE cliente. Fuera de staff, solo
+    // el dueno de la orden.
+    if (!isStaff(user) && order.customer.user.id !== user.id) {
       throw new ForbiddenException({
         code: ERROR_CODES.FORBIDDEN,
         message: 'You cannot approve credit for another customer order',
@@ -1331,9 +1339,7 @@ export class PaymentsService {
     payment: PaymentWithOrder,
     user: AuthenticatedUser,
   ) {
-    if (
-      user.roles.some((role) => role === ROLES.ADMIN || role === ROLES.OPERATOR)
-    ) {
+    if (isStaff(user)) {
       return;
     }
 

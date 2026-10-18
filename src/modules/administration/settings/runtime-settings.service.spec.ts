@@ -40,6 +40,19 @@ function setup(rows: { key: string; value: string; valueType: string }[] = []) {
 }
 
 describe('RuntimeSettingsService', () => {
+  afterEach(() => jest.useRealTimers());
+
+  it('does not poll the database by default (lets Neon scale to zero)', async () => {
+    jest.useFakeTimers();
+    const { service, prisma } = setup();
+
+    await service.onModuleInit();
+    jest.advanceTimersByTime(10 * 60_000);
+
+    expect(prisma.systemParameter.findMany).toHaveBeenCalledTimes(1);
+    service.onModuleDestroy();
+  });
+
   it('falls back to the environment when nothing is stored', async () => {
     const { service } = setup();
     await service.refresh();

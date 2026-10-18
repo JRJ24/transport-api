@@ -4,6 +4,7 @@ import type { Job } from 'bullmq';
 import {
   DISPATCH_ORDER_JOB,
   DISPATCH_SWEEP_JOB,
+  DISPATCH_WAKE_JOB,
   MATCHING_QUEUE,
   OFFER_EXPIRE_JOB,
   type DispatchOrderJob,
@@ -27,6 +28,9 @@ export class OfferProcessor extends WorkerHost {
         return;
       case DISPATCH_SWEEP_JOB:
         await this.offers.sweep();
+        return;
+      case DISPATCH_WAKE_JOB:
+        await this.offers.wakeSweep();
         return;
       case DISPATCH_ORDER_JOB:
         await this.offers.onOrderDispatchable(

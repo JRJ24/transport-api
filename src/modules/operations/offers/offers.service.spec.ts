@@ -92,10 +92,12 @@ async function setup(rank: MatchingResult) {
       }),
       // isWaitingForOffer: the order is paid, driverless and has no offer.
       findFirst: jest.fn().mockResolvedValue({ id: 'order-1' }),
+      findMany: jest.fn().mockResolvedValue([]),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     driverOffer: {
       findMany: jest.fn().mockResolvedValue([]),
+      count: jest.fn().mockResolvedValue(0),
       findUnique: jest.fn().mockResolvedValue({
         id: 'offer-1',
         orderId: 'order-1',
@@ -157,6 +159,10 @@ async function setup(rank: MatchingResult) {
   } as unknown as NotificationDispatcherService;
   const scheduler = {
     scheduleExpiry: jest.fn().mockResolvedValue(undefined),
+    arm: jest.fn().mockResolvedValue(undefined),
+    disarm: jest.fn().mockResolvedValue(undefined),
+    isArmed: jest.fn().mockResolvedValue(true),
+    scheduleWake: jest.fn().mockResolvedValue(undefined),
   } as unknown as OfferSchedulerService;
 
   const service = new OffersService(
@@ -518,5 +524,76 @@ describe('OffersService order-status announcements to drivers', () => {
     await service.manualAssign(operator, 'order-1', { driverId: 'd2' });
 
     expect(realtime.emitOfferUpdated).not.toHaveBeenCalled();
+  });
+});
+
+describe('OffersService.sweep (scale-to-zero)', () => {
+  const now = new Date('2026-10-18T12:00:00Z');
+
+  it('does not touch the database while unarmed', async () => {
+    const { service, prisma, scheduler } = await setup(ranking([]));
+    (scheduler.isArmed as jest.Mock).mockResolvedValue(false);
+
+    await service.sweep(now);
+
+    expect(prisma.driverOffer.findMany).not.toHaveBeenCalled();
+    expect(prisma.driverOffer.count).not.toHaveBeenCalled();
+    expect(prisma.transportOrder.findFirst).not.toHaveBeenCalled();
+    expect(prisma.transportOrder.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('disarms once nothing is pending', async () => {
+    const { service, prisma, scheduler } = await setup(ranking([]));
+    (prisma.transportOrder.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.driverOffer.count as jest.Mock).mockResolvedValue(0);
+
+    await service.sweep(now);
+
+    expect(scheduler.disarm).toHaveBeenCalled();
+    expect(scheduler.scheduleWake).not.toHaveBeenCalled();
+  });
+
+  it('stays armed while an offer is pending', async () => {
+    const { service, prisma, scheduler } = await setup(ranking([]));
+    (prisma.transportOrder.findFirst as jest.Mock).mockResolvedValue(null);
+    (prisma.driverOffer.count as jest.Mock).mockResolvedValue(1);
+
+    await service.sweep(now);
+
+    expect(scheduler.disarm).not.toHaveBeenCalled();
+  });
+
+  it('stays armed while an order waits for a driver right now', async () => {
+    const { service, prisma, scheduler } = await setup(ranking([]));
+    (prisma.transportOrder.findFirst as jest.Mock).mockResolvedValueOnce({
+      id: 'order-due',
+    });
+
+    await service.sweep(now);
+
+    expect(scheduler.disarm).not.toHaveBeenCalled();
+  });
+
+  it('only a future scheduled order: wakes up at its window and disarms', async () => {
+    const { service, prisma, scheduler } = await setup(ranking([]));
+    const scheduleAt = new Date(now.getTime() + 3 * 60 * 60_000);
+    (prisma.transportOrder.findFirst as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ scheduleAt });
+
+    await service.sweep(now);
+
+    expect(scheduler.scheduleWake).toHaveBeenCalledWith(
+      new Date(scheduleAt.getTime() - 30 * 60_000),
+    );
+    expect(scheduler.disarm).toHaveBeenCalled();
+  });
+
+  it('a paid order arms the sweep', async () => {
+    const { service, scheduler } = await setup(ranking([]));
+
+    await service.onOrderDispatchable('order-1');
+
+    expect(scheduler.arm).toHaveBeenCalled();
   });
 });

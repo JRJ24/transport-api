@@ -4,8 +4,22 @@ import multer from 'multer';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { isAllowedUploadMimeType } from '@/common/middlewares/processFile';
 
-/** Mismo tope por peticion que tenia el middleware processFile. */
-export const MAX_FILES_PER_UPLOAD = 10;
+/**
+ * Archivos por peticion. Multer los guarda en RAM antes de que
+ * AttachmentsService pueda responder 403, asi que el tope acota lo que una
+ * sola peticion autenticada (pero ajena a la entidad) retiene en memoria:
+ * MAX_FILES_PER_UPLOAD x MAX_UPLOAD_MB. Las dos apps de conductor mandan 2
+ * (foto + firma) y el portal no sube; 5 deja margen. Antes eran 10.
+ */
+export const MAX_FILES_PER_UPLOAD = 5;
+/**
+ * Campos de texto: solo entityType y entityId (el resto da 400 por
+ * forbidNonWhitelisted, pero Multer ya los habria leido). Por defecto busboy
+ * acepta infinitos campos de 1 MB cada uno, tambien en RAM.
+ */
+export const MAX_FIELDS_PER_UPLOAD = 5;
+/** Bytes por campo: entityId mide como mucho 120 caracteres. */
+export const MAX_FIELD_SIZE_BYTES = 1024;
 const DEFAULT_MAX_UPLOAD_MB = 50;
 
 /**
@@ -27,6 +41,8 @@ export function buildEvidenceUploadOptions(
     limits: {
       fileSize: maxMb * 1024 * 1024,
       files: MAX_FILES_PER_UPLOAD,
+      fields: MAX_FIELDS_PER_UPLOAD,
+      fieldSize: MAX_FIELD_SIZE_BYTES,
     },
     fileFilter: (_req, file, cb) => {
       if (isAllowedUploadMimeType(file.mimetype)) {

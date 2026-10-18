@@ -14,8 +14,18 @@ import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { demandConfig, matchingConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
 
-/** How often every instance re-reads the table, so an edit lands without a restart. */
-const REFRESH_MS = 30_000;
+/**
+ * Periodic re-read of the table, off by default (0). Each instance already
+ * reloads right after its own writes, and the API runs as a single
+ * container. A timer here queried Postgres every 30 s with nobody using the
+ * app, so Neon could never scale to zero. With several instances, set
+ * RUNTIME_SETTINGS_REFRESH_MS (ideally > 5 min) or restart after a manual
+ * database edit.
+ */
+function refreshIntervalMs(): number {
+  const ms = Number(process.env.RUNTIME_SETTINGS_REFRESH_MS ?? 0);
+  return Number.isFinite(ms) && ms > 0 ? ms : 0;
+}
 
 type Envs = {
   matching: ConfigType<typeof matchingConfig>;
@@ -154,7 +164,7 @@ export interface RuntimeSettingView {
 
 /**
  * Settings that change behaviour without a deploy. Values live in
- * SystemParameter; each instance keeps a snapshot refreshed every 30 s and
+ * SystemParameter; each instance keeps a snapshot loaded at startup and
  * right after its own writes, so getters stay synchronous and cheap.
  */
 @Injectable()
@@ -177,8 +187,11 @@ export class RuntimeSettingsService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit(): Promise<void> {
     await this.refresh();
-    this.timer = setInterval(() => void this.refresh(), REFRESH_MS);
-    this.timer.unref?.();
+    const every = refreshIntervalMs();
+    if (every > 0) {
+      this.timer = setInterval(() => void this.refresh(), every);
+      this.timer.unref?.();
+    }
   }
 
   onModuleDestroy(): void {

@@ -29,6 +29,7 @@ function setup() {
     driverProfile: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     orderAssignment: {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      findUnique: jest.fn().mockResolvedValue(assignment),
       findUniqueOrThrow: jest.fn().mockResolvedValue(assignment),
       create: jest.fn().mockResolvedValue(assignment),
     },
@@ -76,7 +77,7 @@ function setup() {
     } as unknown as PresenceService,
     { autoOffer: 'off' } as ReturnType<typeof matchingConfig>,
   );
-  return { service, realtime };
+  return { service, realtime, prisma, tx };
 }
 
 // La app del conductor recarga sus asignaciones con order.status.changed, asi
@@ -127,5 +128,85 @@ describe('AssignmentsService order-status announcements', () => {
         driverIds: ['d1'],
       }),
     );
+  });
+});
+
+// OrdersService.cancel/updateStatus bloquean la orden y luego sus
+// asignaciones; accept y reject tienen que ir en el mismo orden o una
+// cancelacion simultanea termina en deadlock.
+describe('AssignmentsService lock order', () => {
+  it('accept locks the order before the assignment', async () => {
+    const { service, tx } = setup();
+
+    await service.accept('asg-1', operator);
+
+    expect(tx.transportOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', status: STATUS_ORDERS.ASSIGNED },
+      data: { status: STATUS_ORDERS.ACCEPTED },
+    });
+    expect(tx.orderAssignment.updateMany).toHaveBeenCalledWith({
+      where: { id: 'asg-1', assignmentStatus: ASSIGNMENT_STATUS.PENDING },
+      data: expect.objectContaining({
+        assignmentStatus: ASSIGNMENT_STATUS.ACCEPTED,
+      }),
+    });
+    expect(
+      tx.transportOrder.updateMany.mock.invocationCallOrder[0],
+    ).toBeLessThan(tx.orderAssignment.updateMany.mock.invocationCallOrder[0]);
+  });
+
+  it('reject locks the order before the assignment', async () => {
+    const { service, tx } = setup();
+
+    await service.reject('asg-1', operator);
+
+    expect(tx.transportOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', status: STATUS_ORDERS.ASSIGNED },
+      data: { status: STATUS_ORDERS.REQUESTED },
+    });
+    expect(
+      tx.transportOrder.updateMany.mock.invocationCallOrder[0],
+    ).toBeLessThan(tx.orderAssignment.updateMany.mock.invocationCallOrder[0]);
+  });
+
+  it('keeps the 409 for an assignment that is no longer pending, without touching the order', async () => {
+    const { service, tx, realtime } = setup();
+    tx.orderAssignment.findUnique.mockResolvedValue({
+      id: 'asg-1',
+      orderId: 'order-1',
+      driverId: 'd1',
+      assignmentStatus: ASSIGNMENT_STATUS.CANCELLED,
+    });
+
+    await expect(service.accept('asg-1', operator)).rejects.toMatchObject({
+      status: 409,
+      response: { message: 'Assignment is no longer pending' },
+    });
+    await expect(service.reject('asg-1', operator)).rejects.toMatchObject({
+      status: 409,
+    });
+    expect(tx.transportOrder.updateMany).not.toHaveBeenCalled();
+    expect(realtime.emitOrderStatusChanged).not.toHaveBeenCalled();
+  });
+
+  it('keeps the 404 for an unknown assignment', async () => {
+    const { service, tx } = setup();
+    tx.orderAssignment.findUnique.mockResolvedValue(null);
+
+    await expect(service.accept('nope', operator)).rejects.toMatchObject({
+      status: 404,
+    });
+    expect(tx.transportOrder.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('accept answers 409 when the order stopped waiting for the driver', async () => {
+    const { service, tx } = setup();
+    tx.transportOrder.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(service.accept('asg-1', operator)).rejects.toMatchObject({
+      status: 409,
+      response: { message: 'Order is no longer waiting for this driver' },
+    });
+    expect(tx.orderAssignment.updateMany).not.toHaveBeenCalled();
   });
 });
