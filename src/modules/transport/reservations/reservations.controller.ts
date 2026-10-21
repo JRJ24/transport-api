@@ -14,6 +14,7 @@ import { ROLES } from '@generated/prisma/enums';
 import { CurrentUser } from '@/common/decorators/current-user.decorator';
 import { Roles } from '@/common/decorators/roles.decorator';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
+import { CancelReservationDto } from './dto/cancel-reservation.dto';
 import { CreateReservationDto } from './dto/create-reservation.dto';
 import { ReservationQueryDto } from './dto/reservation-query.dto';
 import { RescheduleReservationDto } from './dto/reschedule-reservation.dto';
@@ -48,13 +49,18 @@ export class ReservationsController {
     return this.service.reschedule(id, dto, user.id);
   }
 
-  @ApiOperation({ summary: 'Cancel a reservation' })
+  @ApiOperation({
+    summary: 'Cancel a reservation and its order',
+    description:
+      'An order still open is cancelled too (ADMIN_CANCELLED), with its payment settled: refund queued or credit released.',
+  })
   @Patch(':id/cancel')
   cancel(
     @CurrentUser() user: AuthenticatedUser,
     @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: CancelReservationDto,
   ): Promise<Reservation> {
-    return this.service.cancel(id, user.id);
+    return this.service.cancel(id, user, dto);
   }
 
   @ApiOperation({ summary: 'Complete a reservation' })

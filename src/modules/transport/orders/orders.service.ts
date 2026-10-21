@@ -934,7 +934,7 @@ export class OrdersService {
         include: ORDER_INCLUDE,
       });
 
-      await tx.orderEvent.create({
+      const statusEvent = await tx.orderEvent.create({
         data: {
           orderId: id,
           eventType: this.eventForStatus(dto.status),
@@ -975,6 +975,31 @@ export class OrdersService {
           ...(await this.releaseOrderDrivers(tx, id, now)),
         );
         closedForDriverIds.push(...releasedDriverIds);
+      }
+
+      // A failed trip was paid for and will not happen: same money handling
+      // as a cancellation, without a fee (LOG-API-008). The refund lands in
+      // the queue, where operations can still decline it (FAILED) when the
+      // failure was the customer's.
+      if (dto.status === STATUS_ORDERS.FAILED) {
+        await this.closeOrderReservations(tx, id);
+        const settlement = await this.settleClosedOrderPayments(tx, {
+          orderId: id,
+          status: current.status,
+          ruleFee: 0,
+          reason: 'Trip failed',
+          actorUserId: user.id,
+        });
+        await tx.orderEvent.update({
+          where: { id: statusEvent.id },
+          data: {
+            metadata: {
+              status: dto.status,
+              previousStatus: current.status,
+              refundAmount: settlement.refundAmount,
+            },
+          },
+        });
       }
 
       return tx.transportOrder.findUniqueOrThrow({
@@ -1209,8 +1234,9 @@ export class OrdersService {
         });
       }
       releasedDriverIds.push(...(await this.releaseOrderDrivers(tx, id, now)));
+      await this.closeOrderReservations(tx, id);
 
-      const settlement = await this.settleCancelledPayments(tx, {
+      const settlement = await this.settleClosedOrderPayments(tx, {
         orderId: id,
         status: current.status,
         cancellationType,
@@ -1614,24 +1640,48 @@ export class OrdersService {
   }
 
   /**
-   * What a cancelled order does with its money, in the cancel transaction:
-   * attempts still in flight are voided (a late CardNET capture then becomes
-   * a refund, see PaymentsService), the fee is kept from what was collected,
-   * and the rest goes back - corporate credit released at once, cards and
-   * checks as a PENDING refund for operations. Before this every cancel kept
-   * the whole payment with refundAmount 0.
+   * A scheduled order's reservation lives and dies with it: a cancelled or
+   * failed order left its reservation ACTIVE, still listed in the agenda.
    */
-  private async settleCancelledPayments(
+  private closeOrderReservations(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<Prisma.BatchPayload> {
+    return tx.reservation.updateMany({
+      where: {
+        orderId,
+        reservationStatus: {
+          in: [RESERVATIONS_STATUS.ACTIVE, RESERVATIONS_STATUS.RESCHUDULED],
+        },
+      },
+      data: { reservationStatus: RESERVATIONS_STATUS.CANCELLED },
+    });
+  }
+
+  /**
+   * What an order that ends without being delivered (CANCELLED, or a FAILED
+   * trip) does with its money, in the same transaction: attempts still in
+   * flight are voided (a late CardNET capture then becomes a refund, see
+   * PaymentsService), a cancellation fee is kept from what was collected, and
+   * the rest goes back - corporate credit released at once, cards and checks
+   * as a PENDING refund for operations. Before this every cancel kept the
+   * whole payment with refundAmount 0 (LOG-API-007/008).
+   *
+   * `cancellationType` is what decides a fee; a failed trip has none, so it
+   * is refunded in full and operations decides from the refund queue.
+   */
+  private async settleClosedOrderPayments(
     tx: Prisma.TransactionClient,
     input: {
       orderId: string;
       status: STATUS_ORDERS;
-      cancellationType: ORDER_CANCELLATION;
+      cancellationType?: ORDER_CANCELLATION;
       ruleFee: number;
       reason: string;
       actorUserId: string;
     },
   ): Promise<{ feeAmount: number; refundAmount: number }> {
+    const closedAs = input.cancellationType ?? 'TRIP_FAILED';
     await tx.payment.updateMany({
       where: {
         orderId: input.orderId,
@@ -1645,18 +1695,41 @@ export class OrdersService {
       orderBy: { createdAt: 'asc' },
     });
     const collected = payments.filter(isCollected);
-    const feeAmount = cancellationFee({
-      status: input.status,
-      cancellationType: input.cancellationType,
-      ruleFee: input.ruleFee,
-      collected: collectedAmount(collected),
-    });
+    // A card authorization the provider has not captured: the customer's
+    // funds are on hold, not ours. No fee comes out of it; operations
+    // releases it in the provider's portal from the refund queue.
+    const held = payments.filter(
+      (payment) =>
+        payment.status === PAYMENT_STATUS.AUTHORIZED && !isCollected(payment),
+    );
+    const feeAmount = input.cancellationType
+      ? cancellationFee({
+          status: input.status,
+          cancellationType: input.cancellationType,
+          ruleFee: input.ruleFee,
+          collected: collectedAmount(collected),
+        })
+      : 0;
 
     let feeLeft = feeAmount;
     let refundAmount = 0;
     // Only credit settles inside this transaction; cards and checks wait for
     // operations to return them (RefundsService flips the order then).
-    let stillHoldsMoney = false;
+    let stillHoldsMoney = held.length > 0;
+    for (const payment of held) {
+      refundAmount = roundMoney(refundAmount + Number(payment.amount));
+      await tx.refund.create({
+        data: {
+          paymentId: payment.id,
+          orderId: input.orderId,
+          amount: payment.amount,
+          reason: `Release card authorization, order ${closedAs}: ${input.reason}`,
+          status: PAYMENTS_REFUND_STATUS.PENDING,
+          providerReference: null,
+          createdAt: new Date(),
+        },
+      });
+    }
     for (const payment of collected) {
       const kept = roundMoney(Math.min(feeLeft, Number(payment.amount)));
       feeLeft = roundMoney(feeLeft - kept);
@@ -1671,7 +1744,7 @@ export class OrdersService {
             amount: kept,
             status: PAYMENTS_TRANSACTIONS_STATUS.SUCCESS,
             providerResponse: {
-              cancellationType: input.cancellationType,
+              cancellationType: closedAs,
               reason: input.reason,
             },
           },
@@ -1693,7 +1766,7 @@ export class OrdersService {
           paymentId: payment.id,
           orderId: input.orderId,
           amount: released,
-          reason: `Order cancelled (${input.cancellationType}): ${input.reason}`,
+          reason: `Order ${closedAs}: ${input.reason}`,
           status: PAYMENTS_REFUND_STATUS.PENDING,
           providerReference: null,
           createdAt: new Date(),
@@ -1701,11 +1774,20 @@ export class OrdersService {
       });
     }
 
-    // Everything collected was credit and all of it went back to the line.
-    if (collected.length > 0 && !stillHoldsMoney) {
+    // The order's paymentStatus must not keep saying PAID/PROCESSING for a
+    // trip that will not happen: REFUNDED when everything collected was
+    // credit and went back to the line, CANCELLED when nothing was ever
+    // taken. While a refund is pending it keeps showing what is still held;
+    // RefundsService moves it on once operations returns the money.
+    if (!stillHoldsMoney) {
       await tx.transportOrder.update({
         where: { id: input.orderId },
-        data: { paymentStatus: PAYMENT_STATUS.REFUNDED },
+        data: {
+          paymentStatus:
+            collected.length > 0
+              ? PAYMENT_STATUS.REFUNDED
+              : PAYMENT_STATUS.CANCELLED,
+        },
       });
     }
 

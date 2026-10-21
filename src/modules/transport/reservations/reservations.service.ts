@@ -1,7 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import type { Prisma, Reservation } from '@generated/prisma/client';
-import { RESERVATIONS_STATUS } from '@generated/prisma/enums';
+import {
+  ORDER_CANCELLATION,
+  RESERVATIONS_STATUS,
+  STATUS_ORDERS,
+} from '@generated/prisma/enums';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
+import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { PrismaService } from '@/database/prisma.service';
+import { OrdersService } from '../orders/orders.service';
+import type { CancelReservationDto } from './dto/cancel-reservation.dto';
 import type { CreateReservationDto } from './dto/create-reservation.dto';
 import type { ReservationQueryDto } from './dto/reservation-query.dto';
 import type { RescheduleReservationDto } from './dto/reschedule-reservation.dto';
@@ -16,9 +24,19 @@ const SAFE_USER_SELECT = {
   updatedAt: true,
 } as const;
 
+/** Orders whose trip is already over: nothing left to cancel or refund. */
+const CLOSED_ORDER_STATUSES = new Set<STATUS_ORDERS>([
+  STATUS_ORDERS.CANCELLED,
+  STATUS_ORDERS.FAILED,
+  STATUS_ORDERS.DELIVERED,
+]);
+
 @Injectable()
 export class ReservationsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly orders: OrdersService,
+  ) {}
 
   list(query: ReservationQueryDto): Promise<Reservation[]> {
     const where: Prisma.ReservationWhereInput = {
@@ -129,7 +147,42 @@ export class ReservationsService {
     });
   }
 
-  cancel(id: string, actorUserId: string): Promise<Reservation> {
+  /**
+   * A reservation is the schedule of a SCHEDULED order: cancelling it means
+   * the trip will not happen. It used to flip only the reservation, leaving
+   * the order paid and REQUESTED - dispatched anyway when its window opened,
+   * with the money kept (LOG-API-008). An order still open is cancelled
+   * through OrdersService, which settles the payment and closes this
+   * reservation in the same transaction.
+   */
+  async cancel(
+    id: string,
+    user: AuthenticatedUser,
+    dto: CancelReservationDto = {},
+  ): Promise<Reservation> {
+    const reservation = await this.prisma.reservation.findUnique({
+      where: { id },
+      select: { orderId: true, order: { select: { status: true } } },
+    });
+
+    if (!reservation) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Reservation not found',
+      });
+    }
+
+    if (!CLOSED_ORDER_STATUSES.has(reservation.order.status)) {
+      await this.orders.cancel(user, reservation.orderId, {
+        cancellationType: ORDER_CANCELLATION.ADMIN_CANCELLED,
+        reason: dto.reason?.trim() || 'Reservation cancelled by operations',
+      });
+    }
+
+    return this.markCancelled(id, user.id);
+  }
+
+  private markCancelled(id: string, actorUserId: string): Promise<Reservation> {
     return this.prisma.$transaction(async (tx) => {
       const existing = await tx.reservation.findUnique({ where: { id } });
       const reservation = await tx.reservation.update({

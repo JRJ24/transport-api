@@ -272,12 +272,12 @@ export class RefundsService {
         payments: { select: { status: true, paymentMethod: true } },
       },
     });
+    // Any AUTHORIZED counts: a check or credit holds money, and a card
+    // authorization still holds the customer's funds until it is released.
     const holdsMoney = order?.payments.some(
       (row) =>
         row.status === PAYMENT_STATUS.PAID ||
-        (row.status === PAYMENT_STATUS.AUTHORIZED &&
-          (row.paymentMethod === PAYMENT_METHOD.CHECK ||
-            row.paymentMethod === PAYMENT_METHOD.CORPORATE_CREDIT)),
+        row.status === PAYMENT_STATUS.AUTHORIZED,
     );
     if (order?.status === STATUS_ORDERS.CANCELLED && !holdsMoney) {
       await tx.transportOrder.update({
