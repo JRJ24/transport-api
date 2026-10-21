@@ -474,6 +474,13 @@ export class OrdersService {
         });
       }
 
+      // A quote the customer priced from a route (it carries one) only pays
+      // for that route, whoever attaches it. Staff manual quotes have no
+      // route: staff priced those stops themselves (LOG-API-006).
+      if (quote && quotedRouteOf(quote.breakdown)) {
+        this.assertOrderMatchesQuote(dto, quote.breakdown);
+      }
+
       const order = await tx.transportOrder.create({
         data: {
           orderCode: this.generateOrderCode(),
