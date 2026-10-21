@@ -1,6 +1,10 @@
 import { BadRequestException, ConflictException } from '@nestjs/common';
 import RedisMock from 'ioredis-mock';
-import { OFFER_MODE, OFFER_STATUS } from '@generated/prisma/enums';
+import {
+  OFFER_MODE,
+  OFFER_STATUS,
+  SERVICE_TYPE,
+} from '@generated/prisma/enums';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import type { matchingConfig } from '@/config';
 import type { PrismaService } from '@/database/prisma.service';
@@ -448,6 +452,81 @@ describe('OffersService.onOrderDispatchable', () => {
     await service.onOrderDispatchable('order-1');
 
     expect(realtime.emitOrderStatusChanged).not.toHaveBeenCalled();
+    expect(prisma.driverOffer.create).not.toHaveBeenCalled();
+  });
+
+  // LOG-API-004: paid today for a pickup in 5 days.
+  it('does not offer a scheduled order paid days ahead, it wakes up at its window', async () => {
+    const { service, prisma, realtime, scheduler, matching } = await setup(
+      ranking([candidate('d1', 1)]),
+    );
+    const scheduleAt = new Date(Date.now() + 5 * 24 * 60 * 60_000);
+    (prisma.transportOrder.findUnique as jest.Mock).mockResolvedValue({
+      status: 'REQUESTED',
+      paymentStatus: 'PAID',
+      serviceType: SERVICE_TYPE.SCHEDULED,
+      scheduleAt,
+    });
+
+    await service.onOrderDispatchable('order-1');
+
+    expect(realtime.emitOrderStatusChanged).toHaveBeenCalledWith(
+      expect.objectContaining({ orderId: 'order-1', status: 'REQUESTED' }),
+    );
+    expect(scheduler.scheduleWake).toHaveBeenCalledWith(
+      new Date(scheduleAt.getTime() - 30 * 60_000),
+    );
+    expect(matching.rankForOrder).not.toHaveBeenCalled();
+    expect(prisma.driverOffer.create).not.toHaveBeenCalled();
+    expect(realtime.emitMatchingStatus).not.toHaveBeenCalled();
+  });
+
+  it('offers a scheduled order already inside its lead window', async () => {
+    const { service, prisma, scheduler } = await setup(
+      ranking([candidate('d1', 1)]),
+    );
+    (prisma.transportOrder.findUnique as jest.Mock).mockResolvedValue({
+      status: 'REQUESTED',
+      paymentStatus: 'PAID',
+      serviceType: SERVICE_TYPE.SCHEDULED,
+      scheduleAt: new Date(Date.now() + 20 * 60_000),
+    });
+
+    await service.onOrderDispatchable('order-1');
+
+    expect(scheduler.scheduleWake).not.toHaveBeenCalled();
+    expect(prisma.driverOffer.create).toHaveBeenCalled();
+  });
+});
+
+describe('OffersService scheduled window on every offerNext path (LOG-API-004)', () => {
+  it('only offers orders that are due now', async () => {
+    const { service, prisma } = await setup(ranking([candidate('d1', 1)]));
+
+    await service.offerNext('order-1');
+
+    const [{ where }] = (prisma.transportOrder.findFirst as jest.Mock).mock
+      .calls[0] as [{ where: { OR: Record<string, unknown>[] } }];
+    expect(where.OR).toEqual([
+      { serviceType: SERVICE_TYPE.INMEDIATE },
+      {
+        serviceType: SERVICE_TYPE.SCHEDULED,
+        scheduleAt: { lte: expect.any(Date) as unknown },
+      },
+    ]);
+  });
+
+  it('a rejection does not cascade a future scheduled order to the next driver', async () => {
+    const { service, prisma, matching } = await setup(
+      ranking([candidate('d2', 1)]),
+    );
+    // The window filter keeps the order out of isWaitingForOffer.
+    (prisma.transportOrder.findFirst as jest.Mock).mockResolvedValue(null);
+
+    await service.reject(driverUser, 'offer-1', 'Muy lejos');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(matching.rankForOrder).not.toHaveBeenCalled();
     expect(prisma.driverOffer.create).not.toHaveBeenCalled();
   });
 });

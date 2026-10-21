@@ -574,7 +574,12 @@ export class OffersService {
     await this.scheduler.arm();
     const order = await this.prisma.transportOrder.findUnique({
       where: { id: orderId },
-      select: { status: true, paymentStatus: true },
+      select: {
+        status: true,
+        paymentStatus: true,
+        serviceType: true,
+        scheduleAt: true,
+      },
     });
     if (
       !order ||
@@ -589,6 +594,21 @@ export class OffersService {
       status: order.status,
       changedAt: new Date().toISOString(),
     });
+
+    // A scheduled order paid days ahead is not offered now: a driver who took
+    // it would sit BUSY with an active assignment until pickup, and every
+    // rejection would burn a driver for good (LOG-API-004). It is woken up
+    // when its window opens, like the sweep does.
+    const now = new Date();
+    if (!isDueNow(order, now)) {
+      if (this.autoEnabled && order.scheduleAt) {
+        await this.scheduler.scheduleWake(
+          new Date(order.scheduleAt.getTime() - SCHEDULED_LEAD_MS),
+        );
+      }
+      return;
+    }
+
     if (this.autoEnabled) {
       this.realtime.emitMatchingStatus({
         orderId,
@@ -604,13 +624,16 @@ export class OffersService {
 
   /**
    * Whether the order can take a new automatic offer: paid, still without a
-   * driver, and no offer open. offerNext is reached from timers and events,
-   * so it cannot assume the order is still where it was.
+   * driver, no offer open, and due now (immediate, or scheduled inside its
+   * lead window). offerNext is reached from timers and events - the payment
+   * hook, the reject/expire cascade, the sweep - so the window is checked here,
+   * once, instead of trusting each caller to have applied it.
    */
   private async isWaitingForOffer(orderId: string): Promise<boolean> {
     const order = await this.prisma.transportOrder.findFirst({
       where: {
         id: orderId,
+        OR: this.dueNowFilter(new Date()),
         status: { in: DISPATCH_WAITING_STATUSES },
         paymentStatus: { in: DISPATCHABLE_PAYMENT_STATUSES },
         orderAssignments: {
@@ -782,6 +805,20 @@ export class OffersService {
     }
     return driver;
   }
+}
+
+/** In-memory twin of `dueNowFilter`, for an order already loaded. */
+function isDueNow(
+  order: { serviceType: SERVICE_TYPE; scheduleAt: Date | null },
+  now: Date,
+): boolean {
+  if (order.serviceType !== SERVICE_TYPE.SCHEDULED) {
+    return true;
+  }
+  return (
+    order.scheduleAt !== null &&
+    order.scheduleAt.getTime() <= now.getTime() + SCHEDULED_LEAD_MS
+  );
 }
 
 /** The ranking row an offer was made from, frozen for later explanation. */
