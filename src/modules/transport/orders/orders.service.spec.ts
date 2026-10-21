@@ -3,6 +3,9 @@ import {
   OFFER_MODE,
   OFFER_STATUS,
   ORDER_CANCELLATION,
+  PAYMENT_METHOD,
+  PAYMENT_STATUS,
+  PAYMENTS_REFUND_STATUS,
   QUOTE_STATUS,
   SERVICE_TYPE,
   STATUS_DRIVER,
@@ -149,8 +152,24 @@ function setup(options: SetupOptions = {}) {
         createdAt: new Date(),
       }),
       update: jest.fn().mockResolvedValue(order),
+      // cancel: compare-and-set on the status it read.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
       findUniqueOrThrow: jest.fn().mockResolvedValue(order),
     },
+    // settleCancelledPayments: what the cancelled order holds.
+    payment: {
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      findMany: jest.fn().mockResolvedValue([]),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    refund: { create: jest.fn().mockResolvedValue({}) },
+    paymentTransaction: { create: jest.fn().mockResolvedValue({}) },
+    customerCreditAccount: {
+      findUnique: jest.fn().mockResolvedValue({ id: 'credit-1' }),
+      update: jest.fn().mockResolvedValue({}),
+      findUniqueOrThrow: jest.fn().mockResolvedValue({ balanceUsed: 0 }),
+    },
+    customerCreditMovement: { create: jest.fn().mockResolvedValue({}) },
     orderEvent: { create: jest.fn().mockResolvedValue({}) },
     orderCancellation: { create: jest.fn().mockResolvedValue({}) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
@@ -224,15 +243,17 @@ function setup(options: SetupOptions = {}) {
     revokeOrderRoom: jest.fn(),
   };
   const notifications = { dispatch: jest.fn().mockResolvedValue(undefined) };
+  // The rate rule's cancellation fee the order was priced with.
+  const pricing = { cancellationFeeFor: jest.fn().mockResolvedValue(0) };
 
   const service = new OrdersService(
     prisma as unknown as PrismaService,
     realtime as unknown as RealtimeService,
     {} as AssignmentsService,
     notifications as unknown as NotificationDispatcherService,
-    {} as PricingService,
+    pricing as unknown as PricingService,
   );
-  return { service, prisma, tx, realtime };
+  return { service, prisma, tx, realtime, pricing };
 }
 
 /** Lo que una orden cancelada o fallida debe dejar hecho en la transaccion. */
@@ -274,7 +295,12 @@ function expectDriversReleased(tx: ReturnType<typeof setup>['tx']) {
   });
   // La orden se bloquea antes de buscar asignaciones: un claim concurrente
   // espera y luego la ve cerrada.
-  expect(tx.transportOrder.update.mock.invocationCallOrder[0]).toBeLessThan(
+  // updateStatus locks with update, cancel with its compare-and-set.
+  const lockedAt = Math.min(
+    ...tx.transportOrder.update.mock.invocationCallOrder,
+    ...tx.transportOrder.updateMany.mock.invocationCallOrder,
+  );
+  expect(lockedAt).toBeLessThan(
     tx.orderAssignment.findMany.mock.invocationCallOrder[0],
   );
 }
@@ -400,8 +426,8 @@ describe('OrdersService.cancel', () => {
     await service.cancel(operator, 'order-1', dto);
 
     expect(prisma.$transaction).toHaveBeenCalledTimes(1);
-    expect(tx.transportOrder.update).toHaveBeenCalledWith({
-      where: { id: 'order-1' },
+    expect(tx.transportOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'order-1', status: STATUS_ORDERS.ACCEPTED },
       data: { status: STATUS_ORDERS.CANCELLED },
     });
     expectDriversReleased(tx);
@@ -1459,5 +1485,227 @@ describe('OrdersService.create quote binding (SEC-API-002)', () => {
 
       expect(tx.transportOrder.create).toHaveBeenCalled();
     });
+  });
+});
+
+describe('OrdersService.cancel policy (LOG-API-007)', () => {
+  const reason = { reason: 'Ya no lo necesito' };
+
+  function paid(
+    amount: number,
+    paymentMethod: PAYMENT_METHOD = PAYMENT_METHOD.CARD,
+    status: PAYMENT_STATUS = PAYMENT_STATUS.PAID,
+  ) {
+    return {
+      id: `pay-${paymentMethod}`,
+      customerId: 'cust-1',
+      amount,
+      paymentMethod,
+      status,
+    };
+  }
+
+  it.each([
+    STATUS_ORDERS.DELIVERED,
+    STATUS_ORDERS.FAILED,
+    STATUS_ORDERS.CANCELLED,
+  ])('nobody cancels a %s order', async (status) => {
+    const { service, prisma } = setup({ status });
+
+    await expect(service.cancel(operator, 'order-1', reason)).rejects.toThrow(
+      /Illegal order status transition/,
+    );
+    await expect(
+      service.cancel(customerUser, 'order-1', reason),
+    ).rejects.toThrow(/Illegal order status transition/);
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('a customer cannot cancel a trip in progress, operations can', async () => {
+    const customer = setup({ status: STATUS_ORDERS.IN_PROGRESS });
+    await expect(
+      customer.service.cancel(customerUser, 'order-1', reason),
+    ).rejects.toThrow(/contact operations/);
+    expect(customer.prisma.$transaction).not.toHaveBeenCalled();
+
+    const staff = setup({ status: STATUS_ORDERS.IN_PROGRESS });
+    await staff.service.cancel(operator, 'order-1', reason);
+    expect(staff.tx.orderCancellation.create).toHaveBeenCalled();
+  });
+
+  it('a customer is always CUSTOMER_CANCELLED, whatever they declare', async () => {
+    const { service, tx, pricing } = setup({ status: STATUS_ORDERS.ACCEPTED });
+
+    await service.cancel(customerUser, 'order-1', {
+      ...reason,
+      cancellationType: ORDER_CANCELLATION.ADMIN_CANCELLED,
+    });
+
+    expect(pricing.cancellationFeeFor).toHaveBeenCalled();
+    expect(tx.orderCancellation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        cancellationType: ORDER_CANCELLATION.CUSTOMER_CANCELLED,
+      }) as unknown,
+    });
+  });
+
+  it('staff cannot record SYSTEM_CANCELLED', async () => {
+    const { service, prisma } = setup({ status: STATUS_ORDERS.REQUESTED });
+
+    await expect(
+      service.cancel(operator, 'order-1', {
+        ...reason,
+        cancellationType: ORDER_CANCELLATION.SYSTEM_CANCELLED,
+      }),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(prisma.$transaction).not.toHaveBeenCalled();
+  });
+
+  it('keeps the rate-rule fee once a driver is committed and refunds the rest', async () => {
+    const { service, tx, pricing } = setup({ status: STATUS_ORDERS.ACCEPTED });
+    pricing.cancellationFeeFor.mockResolvedValue(150);
+    tx.payment.findMany.mockResolvedValue([paid(1000)]);
+
+    await service.cancel(customerUser, 'order-1', reason);
+
+    // An attempt still open on CardNET is voided first.
+    expect(tx.payment.updateMany).toHaveBeenCalledWith({
+      where: {
+        orderId: 'order-1',
+        status: { in: [PAYMENT_STATUS.PENDING, PAYMENT_STATUS.PROCESSING] },
+      },
+      data: { status: PAYMENT_STATUS.CANCELLED },
+    });
+    expect(tx.refund.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        paymentId: 'pay-CARD',
+        amount: 850,
+        status: PAYMENTS_REFUND_STATUS.PENDING,
+      }) as unknown,
+    });
+    expect(tx.orderCancellation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        feeApplied: true,
+        feeAmount: 150,
+        refundAmount: 850,
+      }) as unknown,
+    });
+  });
+
+  it('no fee before a driver is committed: full refund', async () => {
+    const { service, tx, pricing } = setup({
+      status: STATUS_ORDERS.REQUESTED,
+    });
+    pricing.cancellationFeeFor.mockResolvedValue(150);
+    tx.payment.findMany.mockResolvedValue([paid(1000)]);
+
+    await service.cancel(customerUser, 'order-1', reason);
+
+    expect(tx.refund.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({ amount: 1000 }) as unknown,
+    });
+    expect(tx.orderCancellation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        feeApplied: false,
+        feeAmount: 0,
+        refundAmount: 1000,
+      }) as unknown,
+    });
+  });
+
+  it('gives corporate credit back to the line instead of a refund', async () => {
+    const { service, tx } = setup({ status: STATUS_ORDERS.REQUESTED });
+    tx.payment.findMany.mockResolvedValue([
+      paid(1000, PAYMENT_METHOD.CORPORATE_CREDIT, PAYMENT_STATUS.AUTHORIZED),
+    ]);
+
+    await service.cancel(operator, 'order-1', reason);
+
+    expect(tx.customerCreditAccount.update).toHaveBeenCalledWith({
+      where: { id: 'credit-1' },
+      data: { balanceUsed: { decrement: 1000 } },
+    });
+    expect(tx.customerCreditMovement.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        movementType: 'REFUND',
+        amount: 1000,
+        orderId: 'order-1',
+      }) as unknown,
+    });
+    expect(tx.payment.update).toHaveBeenCalledWith({
+      where: { id: 'pay-CORPORATE_CREDIT' },
+      data: { status: PAYMENT_STATUS.REFUNDED },
+    });
+    expect(tx.refund.create).not.toHaveBeenCalled();
+    // All the order held went back to the line: nothing left to refund.
+    expect(tx.transportOrder.update).toHaveBeenCalledWith({
+      where: { id: 'order-1' },
+      data: { paymentStatus: PAYMENT_STATUS.REFUNDED },
+    });
+  });
+
+  it('credit with a fee kept: the authorization shrinks to the fee', async () => {
+    const { service, tx, pricing } = setup({ status: STATUS_ORDERS.ACCEPTED });
+    pricing.cancellationFeeFor.mockResolvedValue(150);
+    tx.payment.findMany.mockResolvedValue([
+      paid(1000, PAYMENT_METHOD.CORPORATE_CREDIT, PAYMENT_STATUS.AUTHORIZED),
+    ]);
+
+    await service.cancel(customerUser, 'order-1', reason);
+
+    expect(tx.customerCreditAccount.update).toHaveBeenCalledWith({
+      where: { id: 'credit-1' },
+      data: { balanceUsed: { decrement: 850 } },
+    });
+    expect(tx.payment.update).toHaveBeenCalledWith({
+      where: { id: 'pay-CORPORATE_CREDIT' },
+      data: { amount: 150 },
+    });
+    expect(tx.paymentTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        transactionType: 'CANCELLATION_FEE',
+        amount: 150,
+      }) as unknown,
+    });
+    expect(tx.paymentTransaction.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        transactionType: 'REFUND',
+        amount: 850,
+      }) as unknown,
+    });
+    // The fee is still owed on credit: the order is not REFUNDED.
+    expect(tx.transportOrder.update).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: { paymentStatus: PAYMENT_STATUS.REFUNDED },
+      }),
+    );
+  });
+
+  it('loses the race against a driver starting the trip', async () => {
+    const { service, tx, realtime } = setup({ status: STATUS_ORDERS.ACCEPTED });
+    tx.transportOrder.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      service.cancel(customerUser, 'order-1', reason),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(tx.orderCancellation.create).not.toHaveBeenCalled();
+    expect(realtime.emitOrderStatusChanged).not.toHaveBeenCalled();
+  });
+
+  it('a CANCELLED status PATCH goes through the same cancellation', async () => {
+    const { service, tx } = setup({ status: STATUS_ORDERS.REQUESTED });
+    tx.payment.findMany.mockResolvedValue([paid(1000)]);
+
+    await service.updateStatus(operator, 'order-1', {
+      status: STATUS_ORDERS.CANCELLED,
+    });
+
+    expect(tx.orderCancellation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        cancellationType: ORDER_CANCELLATION.ADMIN_CANCELLED,
+        refundAmount: 1000,
+      }) as unknown,
+    });
+    expect(tx.refund.create).toHaveBeenCalled();
   });
 });

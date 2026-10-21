@@ -65,6 +65,8 @@ function setup() {
   const realtime = {
     emitOrderStatusChanged: jest.fn(),
     emitAssignmentCreated: jest.fn(),
+    // reject saca al conductor de order:{id} despues de avisarle.
+    revokeOrderRoom: jest.fn(),
   };
   const service = new AssignmentsService(
     prisma as unknown as PrismaService,
@@ -128,6 +130,19 @@ describe('AssignmentsService order-status announcements', () => {
         driverIds: ['d1'],
       }),
     );
+    // Pierde la room de la orden, pero solo despues de recibir el aviso.
+    expect(realtime.revokeOrderRoom).toHaveBeenCalledWith('d1', 'order-1');
+    expect(
+      realtime.emitOrderStatusChanged.mock.invocationCallOrder[0],
+    ).toBeLessThan(realtime.revokeOrderRoom.mock.invocationCallOrder[0]);
+  });
+
+  it('keeps the room of the driver whose assignment is accepted', async () => {
+    const { service, realtime } = setup();
+
+    await service.accept('asg-1', operator);
+
+    expect(realtime.revokeOrderRoom).not.toHaveBeenCalled();
   });
 });
 

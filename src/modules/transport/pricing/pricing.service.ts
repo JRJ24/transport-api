@@ -671,6 +671,36 @@ export class PricingService {
     return quote;
   }
 
+  /**
+   * The cancellation fee of the rate rule the order was priced with (the
+   * quote's snapshot names it), so a later price change does not reach orders
+   * already sold. Orders without a priced quote fall back to today's rule for
+   * their category.
+   */
+  async cancellationFeeFor(order: {
+    vehicleCategoryId: string;
+    quote: { breakdown: Prisma.JsonValue | null } | null;
+  }): Promise<number> {
+    const breakdown = order.quote?.breakdown;
+    const rateRuleId =
+      breakdown &&
+      typeof breakdown === 'object' &&
+      !Array.isArray(breakdown) &&
+      typeof breakdown.rateRuleId === 'string'
+        ? breakdown.rateRuleId
+        : null;
+
+    const rule =
+      (rateRuleId &&
+        (await this.prisma.rateRule.findUnique({
+          where: { id: rateRuleId },
+        }))) ||
+      (await this.findActiveRule(order.vehicleCategoryId));
+
+    const fee = Number(rule?.cancellationFee ?? 0);
+    return Number.isFinite(fee) && fee > 0 ? fee : 0;
+  }
+
   private findActiveRule(vehicleCategoryId: string): Promise<RateRule | null> {
     // Several active cards may price the same category: the card with the
     // highest priority wins, then the newest rule.
