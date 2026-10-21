@@ -1,6 +1,7 @@
 import type { RateRule } from '@generated/prisma/client';
 import { PricingService, priceFor } from './pricing.service';
 import type { PrismaService } from '@/database/prisma.service';
+import type { RoutesService } from '../routes/routes.service';
 
 function rule(overrides: Partial<Record<keyof RateRule, unknown>> = {}) {
   return {
@@ -50,11 +51,32 @@ function makeService(data: {
     priceQuote: { create: priceQuoteCreate },
     customerProfile: { findFirst: jest.fn() },
   } as unknown as PrismaService;
+  // What the server measures for the quoted coordinates.
+  const routes = {
+    estimate: jest.fn().mockResolvedValue({
+      distanceKm: 13.2,
+      estimatedDurationMin: 28,
+      distanceSource: 'road',
+      provider: 'google-routes',
+    }),
+  };
 
-  return { service: new PricingService(prisma), prisma, priceQuoteCreate };
+  return {
+    service: new PricingService(prisma, routes as unknown as RoutesService),
+    prisma,
+    priceQuoteCreate,
+    routes,
+  };
 }
 
 const route = { distanceKm: 13.2, estimatedDurationMin: 28 };
+
+const coords = {
+  originLatitude: 18.4861,
+  originLongitude: -69.9312,
+  destinationLatitude: 19.4517,
+  destinationLongitude: -70.697,
+};
 
 describe('PricingService.quoteOptions', () => {
   it('prices every active category and keeps the catalog order', async () => {
@@ -192,12 +214,67 @@ describe('the card price and the charged price', () => {
         vehicleCategoryId: 'cat-moto',
         originAddress: 'Av. Sarasota 12',
         destinationAddress: 'Av. Lincoln 40',
-        ...route,
+        ...coords,
         requireHelper: true,
       } as never,
     )) as unknown as { totalAmount: number };
 
     expect(saved.totalAmount).toBe(option.totalAmount);
+  });
+});
+
+describe('PricingService.createQuote (SEC-API-002)', () => {
+  function quoteService() {
+    const ctx = makeService({ categories: [category()], rules: [rule()] });
+    (ctx.prisma.customerProfile.findFirst as jest.Mock).mockResolvedValue({
+      id: 'customer-1',
+    });
+    ctx.priceQuoteCreate.mockImplementation(
+      ({ data }: { data: unknown }) => data,
+    );
+    return ctx;
+  }
+
+  it('charges the distance measured by the server, not the one in the body', async () => {
+    const { service, routes } = quoteService();
+    routes.estimate.mockResolvedValue({
+      distanceKm: 155,
+      estimatedDurationMin: 150,
+      distanceSource: 'road',
+      provider: 'google-routes',
+    });
+
+    const saved = (await service.createQuote(
+      { id: 'user-1' } as never,
+      {
+        vehicleCategoryId: 'cat-moto',
+        originAddress: 'Santo Domingo centro',
+        destinationAddress: 'Santiago centro',
+        ...coords,
+        distanceKm: 0.1,
+        estimatedDurationMin: 1,
+      } as never,
+    )) as unknown as {
+      distanceKm: number;
+      estimatedDurationMin: number;
+      totalAmount: number;
+      breakdown: { route: Record<string, unknown> };
+    };
+
+    expect(routes.estimate).toHaveBeenCalledWith(
+      expect.objectContaining(coords),
+    );
+    expect(saved.distanceKm).toBe(155);
+    expect(saved.estimatedDurationMin).toBe(150);
+    expect(saved.totalAmount).toBe(
+      priceFor(rule(), { distanceKm: 155, estimatedDurationMin: 150 })
+        .totalAmount,
+    );
+    expect(saved.breakdown.route).toEqual({
+      ...coords,
+      distanceSource: 'road',
+      provider: 'google-routes',
+    });
   });
 });
 

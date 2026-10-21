@@ -26,6 +26,7 @@ import type { UpdateRateRuleDto } from './dto/update-rate-rule.dto';
 import { DemandService, type DemandSnapshot } from './demand.service';
 import { computeFare } from './fare';
 import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
+import { RoutesService } from '../routes/routes.service';
 
 const TAX_RATE = 0.18;
 const QUOTE_TTL_MS = 15 * 60_000;
@@ -93,6 +94,19 @@ export interface QuoteOption {
   unavailable?: 'NO_RATE' | 'CAPACITY';
 }
 
+/**
+ * The route a customer quote was priced for, kept in its breakdown so the
+ * order can be checked against it: the quote is only valid for these stops.
+ */
+export interface QuotedRoute {
+  originLatitude: number;
+  originLongitude: number;
+  destinationLatitude: number;
+  destinationLongitude: number;
+  distanceSource: 'road' | 'straight-line';
+  provider: string;
+}
+
 export interface ManualQuoteCalculation {
   quoteSource: QUOTE_SOURCE;
   quoteStatus: QUOTE_STATUS;
@@ -113,6 +127,7 @@ export interface ManualQuoteCalculation {
 export class PricingService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly routes: RoutesService,
     @Optional() private readonly demand?: DemandService,
     @Optional() private readonly settings?: RuntimeSettingsService,
   ) {}
@@ -317,12 +332,42 @@ export class PricingService {
       });
     }
 
+    // The distance is what gets charged, so it never comes from the client:
+    // any distanceKm/estimatedDurationMin in the body is ignored and the
+    // route is measured here, from the coordinates (SEC-API-002).
+    const estimate = await this.routes.estimate({
+      originAddress: dto.originAddress.trim(),
+      originLatitude: dto.originLatitude,
+      originLongitude: dto.originLongitude,
+      destinationAddress: dto.destinationAddress.trim(),
+      destinationLatitude: dto.destinationLatitude,
+      destinationLongitude: dto.destinationLongitude,
+    });
+    const distanceKm = Math.max(estimate.distanceKm, 0.1);
+    const estimatedDurationMin = Math.max(
+      Math.round(estimate.estimatedDurationMin),
+      1,
+    );
+    const route: QuotedRoute = {
+      originLatitude: dto.originLatitude,
+      originLongitude: dto.originLongitude,
+      destinationLatitude: dto.destinationLatitude,
+      destinationLongitude: dto.destinationLongitude,
+      distanceSource: estimate.distanceSource,
+      provider: estimate.provider,
+    };
+
     const demand = (await this.demandFor(dto, [dto.vehicleCategoryId])).get(
       dto.vehicleCategoryId,
     );
     const amounts = priceFor(
       rule,
-      dto,
+      {
+        distanceKm,
+        estimatedDurationMin,
+        requireHelper: dto.requireHelper,
+        nightService: dto.nightService,
+      },
       demand?.appliedMultiplier ?? 1,
       this.taxRate,
     );
@@ -333,8 +378,8 @@ export class PricingService {
         vehicleCategoryId: dto.vehicleCategoryId,
         originAddress: dto.originAddress.trim(),
         destinationAddress: dto.destinationAddress.trim(),
-        distanceKm: dto.distanceKm,
-        estimatedDurationMin: Math.round(dto.estimatedDurationMin),
+        distanceKm,
+        estimatedDurationMin,
         ...amounts,
         // Snapshot of every input, so the order reproduces its price even
         // after the rate card or the demand rules change.
@@ -346,8 +391,9 @@ export class PricingService {
           pricePerMinute: Number(rule.pricePerMinute),
           minimumFare: Number(rule.minimumFare),
           taxRate: this.taxRate,
-          distanceKm: dto.distanceKm,
-          estimatedDurationMin: Math.round(dto.estimatedDurationMin),
+          distanceKm,
+          estimatedDurationMin,
+          route: { ...route },
           requireHelper: dto.requireHelper ?? false,
           nightService: dto.nightService ?? false,
           ...amounts,
@@ -631,6 +677,29 @@ export class PricingService {
       orderBy: [{ rateCard: { priority: 'desc' } }, { createdAt: 'desc' }],
     });
   }
+}
+
+/** The route stored by `createQuote`, or null for quotes without one. */
+export function quotedRouteOf(
+  breakdown: Prisma.JsonValue | null,
+): QuotedRoute | null {
+  if (!breakdown || typeof breakdown !== 'object' || Array.isArray(breakdown)) {
+    return null;
+  }
+  const route = breakdown.route;
+  if (!route || typeof route !== 'object' || Array.isArray(route)) {
+    return null;
+  }
+  const coords = [
+    route.originLatitude,
+    route.originLongitude,
+    route.destinationLatitude,
+    route.destinationLongitude,
+  ];
+  if (!coords.every((value) => typeof value === 'number')) {
+    return null;
+  }
+  return route as unknown as QuotedRoute;
 }
 
 /** A rate card is usable when it is active and today falls in its window. */

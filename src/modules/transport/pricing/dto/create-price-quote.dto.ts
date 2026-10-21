@@ -26,17 +26,25 @@ export class CreatePriceQuoteDto {
   @Length(5, 180)
   destinationAddress!: string;
 
-  @ApiProperty({ example: 22.5 })
+  @ApiPropertyOptional({
+    deprecated: true,
+    description:
+      'Ignored. The server computes the distance from the coordinates; kept so older clients are not rejected.',
+  })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  @Min(0.1)
-  distanceKm!: number;
+  distanceKm?: number;
 
-  @ApiProperty({ example: 45 })
+  @ApiPropertyOptional({
+    deprecated: true,
+    description:
+      'Ignored. The server computes the duration from the coordinates; kept so older clients are not rejected.',
+  })
+  @IsOptional()
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
-  @Min(1)
-  estimatedDurationMin!: number;
+  estimatedDurationMin?: number;
 
   @ApiPropertyOptional({ default: false })
   @IsOptional()
@@ -48,25 +56,31 @@ export class CreatePriceQuoteDto {
   @IsBoolean()
   nightService?: boolean;
 
-  @ApiPropertyOptional({
-    example: 18.4861,
-    description: 'Pickup latitude, used for the demand multiplier',
-  })
-  @IsOptional()
+  @ApiProperty({ example: 18.4861, description: 'Pickup latitude' })
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(-90)
   @Max(90)
-  originLatitude?: number;
+  originLatitude!: number;
 
-  @ApiPropertyOptional({
-    example: -69.9312,
-    description: 'Pickup longitude, used for the demand multiplier',
-  })
-  @IsOptional()
+  @ApiProperty({ example: -69.9312, description: 'Pickup longitude' })
   @Type(() => Number)
   @IsNumber({ allowNaN: false, allowInfinity: false })
   @Min(-180)
   @Max(180)
-  originLongitude?: number;
+  originLongitude!: number;
+
+  @ApiProperty({ example: 18.4301, description: 'Dropoff latitude' })
+  @Type(() => Number)
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-90)
+  @Max(90)
+  destinationLatitude!: number;
+
+  @ApiProperty({ example: -69.6689, description: 'Dropoff longitude' })
+  @Type(() => Number)
+  @IsNumber({ allowNaN: false, allowInfinity: false })
+  @Min(-180)
+  @Max(180)
+  destinationLongitude!: number;
 }
