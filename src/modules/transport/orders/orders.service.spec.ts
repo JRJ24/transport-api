@@ -1364,4 +1364,100 @@ describe('OrdersService.create quote binding (SEC-API-002)', () => {
       } as never),
     ).rejects.toMatchObject({ status: 409 });
   });
+
+  // LOG-API-006: the audit's scenario, a short DN quote stretched to Punta
+  // Cana through five unpriced intermediate stops.
+  it('refuses a short quote stretched to Punta Cana with intermediate stops', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({
+        route: {
+          ...quotedRoute,
+          destinationLatitude: 18.4951,
+          destinationLongitude: -69.9312,
+        },
+      }),
+    );
+    const longTrip = [
+      stop(STOP_TYPE.PICKUP, 1, 18.4861, -69.9312),
+      ...[2, 3, 4, 5, 6].map((sequence) =>
+        stop(STOP_TYPE.INTERMEDIATE, sequence, 18.5, -69.0),
+      ),
+      stop(STOP_TYPE.DROPOFF, 7, 18.5601, -68.3725),
+    ];
+
+    await expect(
+      service.create(customerUser, orderDto(longTrip)),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(tx.transportOrder.create).not.toHaveBeenCalled();
+    expect(tx.priceQuote.updateMany).not.toHaveBeenCalled();
+  });
+
+  describe('TMS attaching a customer quote', () => {
+    function tmsSetup(attached: Record<string, unknown>) {
+      const ctx = setup();
+      (
+        ctx.prisma.customerProfile as unknown as { findUnique: jest.Mock }
+      ).findUnique.mockResolvedValue({
+        id: 'cust-1',
+        user: { status: 'ACTIVE' },
+      });
+      (ctx.prisma as unknown as { vehicleCategory: unknown }).vehicleCategory =
+        {
+          findUnique: jest
+            .fn()
+            .mockResolvedValue({ maxWeightKg: 1000, maxVolumenM3: 10 }),
+        };
+      ctx.tx.priceQuote.findFirst.mockResolvedValue(attached);
+      return ctx;
+    }
+
+    const tmsDto = (stops: ReturnType<typeof stop>[]) =>
+      ({
+        customerId: 'cust-1',
+        vehicleCategoryId: 'cat-1',
+        quoteId: 'quote-1',
+        serviceType: SERVICE_TYPE.INMEDIATE,
+        stops,
+        items: [{ description: 'Caja', quantity: 1, weightKg: 10 }],
+      }) as never;
+
+    it('refuses it on stops other than the ones it priced', async () => {
+      const { service, tx } = tmsSetup(quote({ route: quotedRoute }));
+
+      await expect(
+        service.createFromTms(
+          operator,
+          tmsDto([
+            stop(STOP_TYPE.PICKUP, 1, 18.4861, -69.9312),
+            stop(STOP_TYPE.DROPOFF, 2, 18.5601, -68.3725),
+          ]),
+        ),
+      ).rejects.toMatchObject({ status: 400 });
+      expect(tx.transportOrder.create).not.toHaveBeenCalled();
+    });
+
+    it('accepts it on the stops it priced', async () => {
+      const { service, tx } = tmsSetup(quote({ route: quotedRoute }));
+
+      await service.createFromTms(operator, tmsDto(matchingStops));
+
+      expect(tx.transportOrder.create).toHaveBeenCalled();
+    });
+
+    it('leaves staff manual quotes (no route) to staff', async () => {
+      const { service, tx } = tmsSetup(quote(null));
+
+      await service.createFromTms(
+        operator,
+        tmsDto([
+          stop(STOP_TYPE.PICKUP, 1),
+          stop(STOP_TYPE.INTERMEDIATE, 2),
+          stop(STOP_TYPE.DROPOFF, 3),
+        ]),
+      );
+
+      expect(tx.transportOrder.create).toHaveBeenCalled();
+    });
+  });
 });
