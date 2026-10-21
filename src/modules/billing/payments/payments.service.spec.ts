@@ -54,11 +54,27 @@ function setup(
     paymentsTransactions: [],
   };
 
+  // The payment row as the database holds it. The conditional updateMany
+  // only writes while it is not settled, like `status: { notIn: [...] }`.
+  const row: Record<string, unknown> = { ...pendingCardnet };
   const tx = {
     payment: {
-      update: jest.fn(({ data }: { data: Record<string, unknown> }) =>
-        Promise.resolve({ ...pendingCardnet, ...data }),
+      updateMany: jest.fn(
+        ({
+          where,
+          data,
+        }: {
+          where: { status: { notIn: PAYMENT_STATUS[] } };
+          data: Record<string, unknown>;
+        }) => {
+          if (where.status.notIn.includes(row.status as PAYMENT_STATUS)) {
+            return Promise.resolve({ count: 0 });
+          }
+          Object.assign(row, data);
+          return Promise.resolve({ count: 1 });
+        },
       ),
+      findUniqueOrThrow: jest.fn(() => Promise.resolve({ ...row })),
     },
     paymentTransaction: { create: jest.fn().mockResolvedValue({}) },
     // rejectedCaptureReason asks for the other payments; syncOrderAfterPayment
@@ -125,7 +141,16 @@ function setup(
     notifications as unknown as NotificationDispatcherService,
   );
 
-  return { service, prisma, tx, gateway, notifications, dispatchTrigger };
+  return {
+    service,
+    prisma,
+    tx,
+    row,
+    pendingCardnet,
+    gateway,
+    notifications,
+    dispatchTrigger,
+  };
 }
 
 describe('PaymentsService order status guard (LOG-API-001)', () => {
@@ -309,6 +334,98 @@ describe('PaymentsService CardNET capture on an order that cannot take it', () =
         paymentStatus: PAYMENT_STATUS.AUTHORIZED,
         status: STATUS_ORDERS.REQUESTED,
       },
+    });
+  });
+});
+
+describe('PaymentsService settled CardNET payments (LOG-API-002)', () => {
+  it('never re-verifies a refunded payment back to PAID', async () => {
+    const { service, prisma, tx, gateway, dispatchTrigger, pendingCardnet } =
+      setup(STATUS_ORDERS.REQUESTED);
+    prisma.payment.findUnique.mockResolvedValue({
+      ...pendingCardnet,
+      status: PAYMENT_STATUS.REFUNDED,
+    });
+
+    const receipt = await service.verifyCardnetPaymentBySession('sess-1');
+
+    expect(receipt.status).toBe(PAYMENT_STATUS.REFUNDED);
+    expect(gateway.getResult).not.toHaveBeenCalled();
+    expect(tx.payment.updateMany).not.toHaveBeenCalled();
+    expect(dispatchTrigger.orderMaybeDispatchable).not.toHaveBeenCalled();
+  });
+
+  it('leaves a payment another request settled meanwhile untouched', async () => {
+    const { service, tx, row, gateway } = setup(STATUS_ORDERS.PENDING_PAYMENT);
+    // The webhook read PROCESSING, but the return URL marked it PAID before
+    // this late, stale CardNET answer was written.
+    gateway.getResult.mockImplementation(() => {
+      row.status = PAYMENT_STATUS.PAID;
+      return Promise.resolve({ ResponseCode: '05', OrdenID: 'ORD-1' });
+    });
+
+    const receipt = await service.verifyCardnetPaymentBySession('sess-1');
+
+    expect(receipt.status).toBe(PAYMENT_STATUS.PAID);
+    expect(row.status).toBe(PAYMENT_STATUS.PAID);
+    expect(tx.paymentTransaction.create).not.toHaveBeenCalled();
+    expect(tx.transportOrder.update).not.toHaveBeenCalled();
+  });
+
+  it('does not let a late cancel redirect turn PAID into CANCELLED', async () => {
+    const { service, prisma, tx, row } = setup(STATUS_ORDERS.PENDING_PAYMENT);
+    // The cancel read the payment while it was still PROCESSING...
+    prisma.payment.findUnique.mockImplementation(() => {
+      const snapshot = { ...row };
+      // ...and the webhook confirmed the charge right after.
+      row.status = PAYMENT_STATUS.PAID;
+      return Promise.resolve(snapshot);
+    });
+
+    const receipt = await service.cancelCardnetPaymentBySession('sess-1');
+
+    expect(receipt?.status).toBe(PAYMENT_STATUS.PAID);
+    expect(row.status).toBe(PAYMENT_STATUS.PAID);
+    expect(tx.transportOrder.update).not.toHaveBeenCalled();
+    expect(tx.paymentTransaction.create).not.toHaveBeenCalled();
+  });
+
+  it('does not cancel a refunded payment', async () => {
+    const { service, prisma, tx, pendingCardnet } = setup(
+      STATUS_ORDERS.CANCELLED,
+    );
+    prisma.payment.findUnique.mockResolvedValue({
+      ...pendingCardnet,
+      status: PAYMENT_STATUS.REFUNDED,
+    });
+
+    const receipt = await service.cancelCardnetPaymentBySession('sess-1');
+
+    expect(receipt?.status).toBe(PAYMENT_STATUS.REFUNDED);
+    expect(tx.payment.updateMany).not.toHaveBeenCalled();
+  });
+
+  it('a declined attempt does not undo an order another payment covers', async () => {
+    const { service, tx, gateway } = setup(STATUS_ORDERS.REQUESTED, {
+      otherPayments: [
+        {
+          amount: 1000,
+          paymentMethod: PAYMENT_METHOD.CARD,
+          status: PAYMENT_STATUS.PAID,
+        },
+      ],
+    });
+    gateway.getResult.mockResolvedValue({
+      ResponseCode: '05',
+      OrdenID: 'ORD-1',
+    });
+
+    await service.verifyCardnetPaymentBySession('sess-1');
+
+    // syncOrderAfterPayment recomputes from every payment: still PAID.
+    expect(tx.transportOrder.update).toHaveBeenCalledWith({
+      where: { id: 'order-1' },
+      data: { paymentStatus: PAYMENT_STATUS.PAID },
     });
   });
 });
