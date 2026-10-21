@@ -3,8 +3,10 @@ import {
   OFFER_MODE,
   OFFER_STATUS,
   ORDER_CANCELLATION,
+  SERVICE_TYPE,
   STATUS_DRIVER,
   STATUS_ORDERS,
+  STOP_TYPE,
   TRACKING_SESSIONS,
 } from '@generated/prisma/enums';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
@@ -139,6 +141,12 @@ function setup(options: SetupOptions = {}) {
   };
   const tx = {
     transportOrder: {
+      create: jest.fn().mockResolvedValue({
+        ...order,
+        status: STATUS_ORDERS.PENDING_PAYMENT,
+        serviceType: SERVICE_TYPE.INMEDIATE,
+        createdAt: new Date(),
+      }),
       update: jest.fn().mockResolvedValue(order),
       findUniqueOrThrow: jest.fn().mockResolvedValue(order),
     },
@@ -186,21 +194,25 @@ function setup(options: SetupOptions = {}) {
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
     deliveryProof: {
-      findMany: jest.fn().mockResolvedValue([
-        { id: 'proof-1', signatures: [{ signatureUrl: SIGNATURE_URL }] },
-      ]),
+      findMany: jest
+        .fn()
+        .mockResolvedValue([
+          { id: 'proof-1', signatures: [{ signatureUrl: SIGNATURE_URL }] },
+        ]),
     },
     attachment: { findFirst: attachmentFinder([photoRow, signatureRow]) },
     orderEvent: {
       findMany: jest.fn().mockResolvedValue([{ id: 'evt-1' }]),
     },
     user: { findMany: jest.fn().mockResolvedValue([]) },
+    priceQuote: { findFirst: jest.fn().mockResolvedValue(null) },
     customerProfile: {
       findUnique: jest.fn().mockResolvedValue(null),
       findFirst: jest.fn().mockResolvedValue({ id: 'cust-1' }),
     },
   };
   const realtime = {
+    emitOrderCreated: jest.fn(),
     emitOrderStatusChanged: jest.fn(),
     emitOfferUpdated: jest.fn(),
     revokeOrderRoom: jest.fn(),
@@ -399,9 +411,7 @@ describe('OrdersService.cancel', () => {
 
   it('returns the order re-read after the assignments were cancelled', async () => {
     const { service, tx } = setup({
-      reread: [
-        row('d1', ASSIGNMENT_STATUS.CANCELLED),
-      ],
+      reread: [row('d1', ASSIGNMENT_STATUS.CANCELLED)],
     });
 
     const order = await service.cancel(operator, 'order-1', dto);
@@ -411,9 +421,7 @@ describe('OrdersService.cancel', () => {
     );
     expect(
       (order as unknown as { orderAssignments: unknown[] }).orderAssignments,
-    ).toEqual([
-      row('d1', ASSIGNMENT_STATUS.CANCELLED),
-    ]);
+    ).toEqual([row('d1', ASSIGNMENT_STATUS.CANCELLED)]);
   });
 
   it('only ends tracking when nobody held the order', async () => {
@@ -558,9 +566,7 @@ describe('OrdersService.updateStatus', () => {
   it('tells the driver whose assignment a delivery completes', async () => {
     const { service, tx, realtime } = setup({
       status: STATUS_ORDERS.IN_PROGRESS,
-      reread: [
-        row('d1', ASSIGNMENT_STATUS.COMPLETED),
-      ],
+      reread: [row('d1', ASSIGNMENT_STATUS.COMPLETED)],
     });
 
     await service.updateStatus(driverUser, 'order-1', {
@@ -733,7 +739,9 @@ describe('OrdersService.findOne driver read rule', () => {
   it('asks for a readable assignment: PENDING/ACCEPTED/COMPLETED, or CANCELLED on a closed order', async () => {
     const { service, prisma } = setup();
     prisma.transportOrder.findUnique.mockResolvedValue(
-      fullOrder(STATUS_ORDERS.ACCEPTED, [row('d1', ASSIGNMENT_STATUS.ACCEPTED)]),
+      fullOrder(STATUS_ORDERS.ACCEPTED, [
+        row('d1', ASSIGNMENT_STATUS.ACCEPTED),
+      ]),
     );
 
     await service.findOne(driverUser, 'order-1');
@@ -909,9 +917,9 @@ describe('OrdersService.listEvents ownership', () => {
   it('serves the timeline to the customer who owns the order', async () => {
     const { service, prisma } = setup();
 
-    await expect(
-      service.listEvents(customerUser, 'order-1'),
-    ).resolves.toEqual([{ id: 'evt-1' }]);
+    await expect(service.listEvents(customerUser, 'order-1')).resolves.toEqual([
+      { id: 'evt-1' },
+    ]);
     expect(prisma.transportOrder.findUnique).toHaveBeenCalledWith({
       where: { id: 'order-1' },
       select: { customerId: true },
@@ -1094,5 +1102,151 @@ describe('OrdersService delivery evidence', () => {
         message: 'Delivery evidence is required before completing the order',
       },
     });
+  });
+});
+
+describe('OrdersService.create quote binding (SEC-API-002)', () => {
+  // Santo Domingo -> Santiago, the route the quote was priced for.
+  const quotedRoute = {
+    originLatitude: 18.4861,
+    originLongitude: -69.9312,
+    destinationLatitude: 19.4517,
+    destinationLongitude: -70.697,
+    distanceSource: 'road',
+    provider: 'google-routes',
+  };
+
+  function quote(breakdown: Record<string, unknown> | null) {
+    return {
+      id: 'quote-1',
+      vehicleCategoryId: 'cat-1',
+      distanceKm: 155,
+      estimatedDurationMin: 150,
+      totalAmount: 9000,
+      expiresAt: new Date(Date.now() + 60_000),
+      breakdown,
+      vehicleCategory: { maxWeightKg: 1000, maxVolumenM3: 10 },
+    };
+  }
+
+  function stop(
+    stopType: STOP_TYPE,
+    sequence: number,
+    latitude?: number,
+    longitude?: number,
+  ) {
+    return {
+      stopType,
+      sequence,
+      contactName: 'Ana Perez',
+      contactPhone: '+18095551234',
+      addressLine: 'Calle Principal 1',
+      city: 'Santo Domingo',
+      province: 'Distrito Nacional',
+      latitude,
+      longitude,
+    };
+  }
+
+  function orderDto(stops: ReturnType<typeof stop>[], requireHelper = false) {
+    return {
+      quoteId: 'quote-1',
+      serviceType: SERVICE_TYPE.INMEDIATE,
+      stops,
+      items: [
+        { description: 'Caja', quantity: 1, weightKg: 10, requireHelper },
+      ],
+    } as never;
+  }
+
+  const matchingStops = [
+    stop(STOP_TYPE.PICKUP, 1, 18.4861, -69.9312),
+    stop(STOP_TYPE.DROPOFF, 2, 19.4517, -70.697),
+  ];
+
+  it('creates the order when its stops are the quoted route', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({ route: quotedRoute, requireHelper: false }),
+    );
+
+    await service.create(customerUser, orderDto(matchingStops));
+
+    expect(tx.transportOrder.create).toHaveBeenCalled();
+  });
+
+  it('refuses a cheap quote attached to a different, longer trip', async () => {
+    const { service, prisma, tx } = setup();
+    // Quote priced for two points 1 km apart in Santo Domingo.
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({
+        route: {
+          ...quotedRoute,
+          destinationLatitude: 18.4951,
+          destinationLongitude: -69.9312,
+        },
+      }),
+    );
+
+    await expect(
+      service.create(customerUser, orderDto(matchingStops)),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(tx.transportOrder.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses stops without coordinates', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({ route: quotedRoute }),
+    );
+
+    await expect(
+      service.create(
+        customerUser,
+        orderDto([stop(STOP_TYPE.PICKUP, 1), stop(STOP_TYPE.DROPOFF, 2)]),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(tx.transportOrder.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses extra stops the quote did not price', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({ route: quotedRoute }),
+    );
+
+    await expect(
+      service.create(
+        customerUser,
+        orderDto([
+          matchingStops[0],
+          stop(STOP_TYPE.INTERMEDIATE, 2, 19.79, -70.69),
+          { ...matchingStops[1], sequence: 3 },
+        ]),
+      ),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(tx.transportOrder.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses quotes created before the route was stored', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(quote({ distanceKm: 0.1 }));
+
+    await expect(
+      service.create(customerUser, orderDto(matchingStops)),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(tx.transportOrder.create).not.toHaveBeenCalled();
+  });
+
+  it('refuses a helper the quote did not charge for', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({ route: quotedRoute, requireHelper: false }),
+    );
+
+    await expect(
+      service.create(customerUser, orderDto(matchingStops, true)),
+    ).rejects.toMatchObject({ status: 400 });
+    expect(tx.transportOrder.create).not.toHaveBeenCalled();
   });
 });

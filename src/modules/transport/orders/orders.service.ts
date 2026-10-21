@@ -27,6 +27,7 @@ import type { OrderAssignment } from '@generated/prisma/client';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { DomainException } from '@/common/exceptions/domain.exception';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
+import { haversineMeters } from '@/common/utils/geo.util';
 import { PrismaService } from '@/database/prisma.service';
 import { RealtimeService } from '@/modules/realtime/realtime.service';
 import { AssignmentsService } from '@/modules/operations/assignments/assignments.service';
@@ -36,6 +37,7 @@ import type { NotificationEvent } from '@/modules/support/notifications/template
 import { orderStatusLabel } from '@/modules/support/notifications/templates/notification.templates';
 import {
   PricingService,
+  quotedRouteOf,
   type ManualQuoteInput,
 } from '../pricing/pricing.service';
 import type { CreateOrderManualQuoteDto } from '../pricing/dto/manual-quote.dto';
@@ -186,6 +188,13 @@ function driverReadableAssignment(
   };
 }
 
+/**
+ * How far an order stop may sit from the point its quote was priced for. The
+ * clients send the same coordinates to both calls, so this only absorbs
+ * rounding; a different address is always further than this.
+ */
+const QUOTE_STOP_TOLERANCE_METERS = 150;
+
 const SAFE_USER_SELECT = {
   id: true,
   fullName: true,
@@ -266,6 +275,7 @@ export class OrdersService {
     }
 
     this.assertVehicleCategoryCapacity(dto, quote.vehicleCategory);
+    this.assertOrderMatchesQuote(dto, quote.breakdown);
 
     const order = await this.prisma.$transaction(async (tx) => {
       const order = await tx.transportOrder.create({
@@ -1590,6 +1600,72 @@ export class OrdersService {
         code: ERROR_CODES.BAD_REQUEST,
         message: 'Cargo volume exceeds the selected vehicle category capacity',
       });
+    }
+  }
+
+  /**
+   * The order is charged the quote's total, so it must be the trip that was
+   * quoted. Without this a customer could price a short route and attach the
+   * quote to a long one (SEC-API-002). The quote prices one pickup and one
+   * dropoff, so that is the only shape it can pay for.
+   */
+  private assertOrderMatchesQuote(
+    dto: Pick<CreateOrderDto, 'stops' | 'items'>,
+    breakdown: Prisma.JsonValue | null,
+  ): void {
+    const mismatch = (message: string) =>
+      new BadRequestException({ code: ERROR_CODES.BAD_REQUEST, message });
+    const route = quotedRouteOf(breakdown);
+
+    if (!route) {
+      throw mismatch('Price quote has no route; request a new quote');
+    }
+
+    const stops = [...dto.stops].sort((a, b) => a.sequence - b.sequence);
+    const pickup = stops[0];
+    const dropoff = stops[stops.length - 1];
+
+    if (
+      stops.length !== 2 ||
+      pickup.stopType !== STOP_TYPE.PICKUP ||
+      dropoff.stopType !== STOP_TYPE.DROPOFF
+    ) {
+      throw mismatch(
+        'The quoted price covers exactly one pickup and one dropoff',
+      );
+    }
+
+    const near = (
+      stop: { latitude?: number; longitude?: number },
+      latitude: number,
+      longitude: number,
+    ) =>
+      stop.latitude !== undefined &&
+      stop.longitude !== undefined &&
+      haversineMeters(
+        { latitude: stop.latitude, longitude: stop.longitude },
+        { latitude, longitude },
+      ) <= QUOTE_STOP_TOLERANCE_METERS;
+
+    if (
+      !near(pickup, route.originLatitude, route.originLongitude) ||
+      !near(dropoff, route.destinationLatitude, route.destinationLongitude)
+    ) {
+      throw mismatch(
+        'Order stops do not match the quoted route; request a new quote',
+      );
+    }
+
+    const quotedHelper =
+      breakdown !== null &&
+      typeof breakdown === 'object' &&
+      !Array.isArray(breakdown) &&
+      breakdown.requireHelper === true;
+
+    if (!quotedHelper && dto.items.some((item) => item.requireHelper)) {
+      throw mismatch(
+        'The quote does not include a helper; request a new quote with one',
+      );
     }
   }
 

@@ -121,6 +121,11 @@ curl -X POST "http://localhost:3000/api/v1/routes/estimate" \
 
 ### Crear cotizacion
 
+La distancia y la duracion las calcula el servidor a partir de las
+coordenadas (`distanceKm`/`estimatedDurationMin` en el body se ignoran). La
+orden creada con esta cotizacion debe llevar una parada PICKUP y una DROPOFF
+en esas mismas coordenadas.
+
 ```bash
 curl -X POST "http://localhost:3000/api/v1/pricing/quotes" \
   -H "Authorization: Bearer $CUSTOMER_TOKEN" \
@@ -128,9 +133,11 @@ curl -X POST "http://localhost:3000/api/v1/pricing/quotes" \
   -d '{
     "vehicleCategoryId": "00000000-0000-0000-0000-000000000001",
     "originAddress": "Av. Winston Churchill 123",
+    "originLatitude": 18.4861,
+    "originLongitude": -69.9312,
     "destinationAddress": "Aeropuerto Internacional Las Americas",
-    "distanceKm": 22.5,
-    "estimatedDurationMin": 45,
+    "destinationLatitude": 18.4301,
+    "destinationLongitude": -69.6689,
     "requireHelper": false,
     "nightService": false
   }'
