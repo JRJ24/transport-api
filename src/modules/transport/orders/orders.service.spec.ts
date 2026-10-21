@@ -205,6 +205,9 @@ function setup(options: SetupOptions = {}) {
         status: options.status ?? STATUS_ORDERS.ACCEPTED,
         paymentStatus: 'PAID',
         customerId: 'cust-1',
+        // Live reservations: their cancellation deadline can make a cancel
+        // late enough to carry the fee.
+        reservations: [] as { cancellationDeadline: Date }[],
       }),
       findFirst: jest.fn().mockResolvedValue({
         id: 'order-1',
@@ -1795,6 +1798,57 @@ describe('OrdersService closing a paid order (LOG-API-008)', () => {
 
     expect(tx.transportOrder.update).not.toHaveBeenCalled();
     expect(tx.refund.create).toHaveBeenCalled();
+  });
+
+  // LOG-API-009: the reservation's deadline, not only a committed driver.
+  it('keeps the fee when a scheduled booking is cancelled past its deadline', async () => {
+    const { service, prisma, tx, pricing } = setup({
+      status: STATUS_ORDERS.REQUESTED,
+    });
+    prisma.transportOrder.findUnique.mockResolvedValue({
+      status: STATUS_ORDERS.REQUESTED,
+      paymentStatus: 'PAID',
+      customerId: 'cust-1',
+      reservations: [{ cancellationDeadline: new Date(Date.now() - 60_000) }],
+    });
+    pricing.cancellationFeeFor.mockResolvedValue(150);
+    tx.payment.findMany.mockResolvedValue([card(PAYMENT_STATUS.PAID)]);
+
+    await service.cancel(customerUser, 'order-1', { reason: 'Ya no' });
+
+    expect(tx.orderCancellation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        feeApplied: true,
+        feeAmount: 150,
+        refundAmount: 850,
+      }) as unknown,
+    });
+  });
+
+  it('a scheduled booking cancelled in time is refunded in full', async () => {
+    const { service, prisma, tx, pricing } = setup({
+      status: STATUS_ORDERS.REQUESTED,
+    });
+    prisma.transportOrder.findUnique.mockResolvedValue({
+      status: STATUS_ORDERS.REQUESTED,
+      paymentStatus: 'PAID',
+      customerId: 'cust-1',
+      reservations: [
+        { cancellationDeadline: new Date(Date.now() + 24 * 60 * 60_000) },
+      ],
+    });
+    pricing.cancellationFeeFor.mockResolvedValue(150);
+    tx.payment.findMany.mockResolvedValue([card(PAYMENT_STATUS.PAID)]);
+
+    await service.cancel(customerUser, 'order-1', { reason: 'Ya no' });
+
+    expect(tx.orderCancellation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        feeApplied: false,
+        feeAmount: 0,
+        refundAmount: 1000,
+      }) as unknown,
+    });
   });
 
   it('cancelling the order closes its reservation in the same transaction', async () => {

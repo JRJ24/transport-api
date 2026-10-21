@@ -9,8 +9,10 @@ import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.i
 import { PrismaService } from '@/database/prisma.service';
 import {
   CUSTOMER_CANCELLABLE_STATUSES,
+  LIVE_RESERVATION_STATUSES,
   cancellationFee,
   collectedAmount,
+  isPastCancellationDeadline,
   roundMoney,
 } from '@/modules/transport/orders/cancellation-policy';
 import { PricingService } from '@/modules/transport/pricing/pricing.service';
@@ -22,6 +24,11 @@ export interface CancellationFeePreview {
   feeApplied: boolean;
   feeAmount: number;
   refundAmount: number;
+  /**
+   * Scheduled orders: until when the customer can still cancel without the
+   * fee (the reservation's cancellation deadline). Null for immediate orders.
+   */
+  freeCancellationUntil: Date | null;
   provider: 'rate-rule';
 }
 
@@ -58,6 +65,11 @@ export class CancellationFeesService {
         payments: {
           select: { status: true, paymentMethod: true, amount: true },
         },
+        reservations: {
+          where: { reservationStatus: { in: LIVE_RESERVATION_STATUSES } },
+          select: { cancellationDeadline: true },
+          orderBy: { cancellationDeadline: 'asc' },
+        },
       },
     });
 
@@ -81,6 +93,9 @@ export class CancellationFeesService {
           cancellationType: ORDER_CANCELLATION.CUSTOMER_CANCELLED,
           ruleFee: await this.pricing.cancellationFeeFor(order),
           collected,
+          pastCancellationDeadline: isPastCancellationDeadline(
+            order.reservations,
+          ),
         })
       : 0;
 
@@ -90,6 +105,8 @@ export class CancellationFeesService {
       feeApplied: feeAmount > 0,
       feeAmount,
       refundAmount: cancellable ? roundMoney(collected - feeAmount) : 0,
+      freeCancellationUntil:
+        order.reservations[0]?.cancellationDeadline ?? null,
       provider: 'rate-rule',
     };
   }
