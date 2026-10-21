@@ -8,7 +8,50 @@ import {
   CUSTOMER_CANCELLABLE_STATUSES,
   cancellationFee,
   collectedAmount,
+  isPastCancellationDeadline,
 } from './cancellation-policy';
+
+describe('cancellation deadline (LOG-API-009)', () => {
+  const base = {
+    cancellationType: ORDER_CANCELLATION.CUSTOMER_CANCELLED,
+    ruleFee: 150,
+    collected: 1000,
+    status: STATUS_ORDERS.REQUESTED,
+  };
+
+  it('charges a scheduled order cancelled past its deadline, with no driver yet', () => {
+    expect(cancellationFee({ ...base, pastCancellationDeadline: true })).toBe(
+      150,
+    );
+    expect(cancellationFee({ ...base, pastCancellationDeadline: false })).toBe(
+      0,
+    );
+  });
+
+  it('never charges operations or a driver for a late cancel', () => {
+    expect(
+      cancellationFee({
+        ...base,
+        cancellationType: ORDER_CANCELLATION.ADMIN_CANCELLED,
+        pastCancellationDeadline: true,
+      }),
+    ).toBe(0);
+  });
+
+  it('a deadline counts as passed from its exact minute on', () => {
+    const now = new Date('2026-10-21T15:00:00Z');
+    expect(
+      isPastCancellationDeadline([{ cancellationDeadline: now }], now),
+    ).toBe(true);
+    expect(
+      isPastCancellationDeadline(
+        [{ cancellationDeadline: new Date('2026-10-21T15:01:00Z') }],
+        now,
+      ),
+    ).toBe(false);
+    expect(isPastCancellationDeadline([], now)).toBe(false);
+  });
+});
 
 describe('cancellation policy', () => {
   it('lets a customer cancel until the trip starts, never after', () => {

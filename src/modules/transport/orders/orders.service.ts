@@ -49,10 +49,12 @@ import {
 import type { CreateOrderManualQuoteDto } from '../pricing/dto/manual-quote.dto';
 import {
   CUSTOMER_CANCELLABLE_STATUSES,
+  LIVE_RESERVATION_STATUSES,
   STAFF_CANCELLATION_TYPES,
   cancellationFee,
   collectedAmount,
   isCollected,
+  isPastCancellationDeadline,
   roundMoney,
 } from './cancellation-policy';
 import type { CancelOrderDto } from './dto/cancel-order.dto';
@@ -1180,6 +1182,10 @@ export class OrdersService {
         customerId: true,
         vehicleCategoryId: true,
         quote: { select: { breakdown: true } },
+        reservations: {
+          where: { reservationStatus: { in: LIVE_RESERVATION_STATUSES } },
+          select: { cancellationDeadline: true },
+        },
       },
     });
 
@@ -1218,6 +1224,11 @@ export class OrdersService {
         : 0;
 
     const now = new Date();
+    // Read before closeOrderReservations below cancels the reservation.
+    const pastCancellationDeadline = isPastCancellationDeadline(
+      current.reservations,
+      now,
+    );
     const releasedDriverIds: string[] = [];
     const order = await this.prisma.$transaction(async (tx) => {
       // Compare-and-set on the status read above: a driver starting the trip
@@ -1241,6 +1252,7 @@ export class OrdersService {
         status: current.status,
         cancellationType,
         ruleFee,
+        pastCancellationDeadline,
         reason,
         actorUserId: user.id,
       });
@@ -1677,6 +1689,7 @@ export class OrdersService {
       status: STATUS_ORDERS;
       cancellationType?: ORDER_CANCELLATION;
       ruleFee: number;
+      pastCancellationDeadline?: boolean;
       reason: string;
       actorUserId: string;
     },
@@ -1708,6 +1721,7 @@ export class OrdersService {
           cancellationType: input.cancellationType,
           ruleFee: input.ruleFee,
           collected: collectedAmount(collected),
+          pastCancellationDeadline: input.pastCancellationDeadline,
         })
       : 0;
 

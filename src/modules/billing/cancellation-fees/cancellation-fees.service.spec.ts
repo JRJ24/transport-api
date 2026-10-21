@@ -11,7 +11,11 @@ import { CancellationFeesService } from './cancellation-fees.service';
 const customer = { id: 'user-c1', roles: ['CUSTOMER'] } as AuthenticatedUser;
 const operator = { id: 'user-op', roles: ['OPERATOR'] } as AuthenticatedUser;
 
-function setup(status: STATUS_ORDERS, ruleFee = 150) {
+function setup(
+  status: STATUS_ORDERS,
+  ruleFee = 150,
+  reservations: { cancellationDeadline: Date }[] = [],
+) {
   const prisma = {
     transportOrder: {
       findUnique: jest.fn().mockResolvedValue({
@@ -25,6 +29,7 @@ function setup(status: STATUS_ORDERS, ruleFee = 150) {
             status: PAYMENT_STATUS.PAID,
           },
         ],
+        reservations,
       }),
     },
   };
@@ -46,8 +51,37 @@ describe('CancellationFeesService (LOG-API-007)', () => {
       feeApplied: true,
       feeAmount: 150,
       refundAmount: 850,
+      freeCancellationUntil: null,
       provider: 'rate-rule',
     });
+  });
+
+  // LOG-API-009: a scheduled order has no driver until minutes before pickup.
+  it('a scheduled order past its cancellation deadline shows the fee', async () => {
+    const deadline = new Date(Date.now() - 5 * 60_000);
+    const { service } = setup(STATUS_ORDERS.REQUESTED, 150, [
+      { cancellationDeadline: deadline },
+    ]);
+
+    await expect(service.calculate('order-1', customer)).resolves.toMatchObject(
+      {
+        feeApplied: true,
+        feeAmount: 150,
+        refundAmount: 850,
+        freeCancellationUntil: deadline,
+      },
+    );
+  });
+
+  it('a scheduled order before its deadline is still free to cancel', async () => {
+    const deadline = new Date(Date.now() + 24 * 60 * 60_000);
+    const { service } = setup(STATUS_ORDERS.REQUESTED, 150, [
+      { cancellationDeadline: deadline },
+    ]);
+
+    await expect(service.calculate('order-1', customer)).resolves.toMatchObject(
+      { feeAmount: 0, refundAmount: 1000, freeCancellationUntil: deadline },
+    );
   });
 
   it('shows no fee before a driver is committed', async () => {

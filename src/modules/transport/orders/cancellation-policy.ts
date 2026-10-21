@@ -3,6 +3,7 @@ import {
   ORDER_CANCELLATION,
   PAYMENT_METHOD,
   PAYMENT_STATUS,
+  RESERVATIONS_STATUS,
   STATUS_ORDERS,
 } from '@generated/prisma/enums';
 
@@ -69,24 +70,50 @@ export function collectedAmount(
 }
 
 /**
- * The rate rule's fee, only when the customer walks away from a driver who is
- * already committed, and never more than was collected: a fee is kept from
- * the payment, not billed on top of an unpaid order.
+ * The rate rule's fee, only when the customer walks away late - a driver is
+ * already committed, or a scheduled order is past its reservation's
+ * cancellation deadline (pickup - 1 h) - and never more than was collected:
+ * a fee is kept from the payment, not billed on top of an unpaid order.
+ *
+ * The deadline matters because a scheduled order gets no driver until
+ * minutes before pickup: on the driver rule alone it was free to cancel a
+ * booking right up to the pickup time (LOG-API-009).
  */
 export function cancellationFee(input: {
   status: STATUS_ORDERS;
   cancellationType: ORDER_CANCELLATION;
   ruleFee: number;
   collected: number;
+  pastCancellationDeadline?: boolean;
 }): number {
+  const late =
+    DRIVER_COMMITTED_STATUSES.has(input.status) ||
+    input.pastCancellationDeadline === true;
   if (
     input.cancellationType !== ORDER_CANCELLATION.CUSTOMER_CANCELLED ||
-    !DRIVER_COMMITTED_STATUSES.has(input.status)
+    !late
   ) {
     return 0;
   }
   return roundMoney(Math.min(Math.max(input.ruleFee, 0), input.collected));
 }
+
+/** The deadline of the order's live reservation, if any, has passed. */
+export function isPastCancellationDeadline(
+  reservations: { cancellationDeadline: Date }[],
+  now: Date = new Date(),
+): boolean {
+  return reservations.some(
+    (reservation) =>
+      reservation.cancellationDeadline.getTime() <= now.getTime(),
+  );
+}
+
+/** Reservations still on the agenda: their deadline is the one that binds. */
+export const LIVE_RESERVATION_STATUSES = [
+  RESERVATIONS_STATUS.ACTIVE,
+  RESERVATIONS_STATUS.RESCHUDULED,
+];
 
 export function roundMoney(value: number): number {
   return Number(value.toFixed(2));
