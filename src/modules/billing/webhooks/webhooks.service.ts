@@ -1,21 +1,35 @@
-import { Injectable, Optional } from '@nestjs/common';
-import type { Prisma, WebhookEvent } from '@generated/prisma/client';
+import { createHmac, timingSafeEqual } from 'node:crypto';
 import {
-  PAYMENT_STATUS,
-  PAYMENT_TRANSACTIONS_TYPE,
-  PAYMENTS_TRANSACTIONS_STATUS,
-  STATUS_ORDERS,
-} from '@generated/prisma/enums';
+  Inject,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
+import type { Prisma, WebhookEvent } from '@generated/prisma/client';
+import { paymentConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
-import { DispatchTriggerService } from '@/modules/operations/offers/dispatch-trigger.service';
+import { PaymentsService } from '../payments/payments.service';
 import { optionalString } from '../payments/providers/payment-provider.interface';
 import type { CreateWebhookEventDto } from './dto/create-webhook-event.dto';
 
+export type WebhookProvider = 'cardnet' | 'azul';
+
+export interface WebhookAck {
+  received: true;
+  processed: boolean;
+  paymentStatus?: string;
+}
+
 @Injectable()
 export class WebhooksService {
+  private readonly logger = new Logger(WebhooksService.name);
+
   constructor(
     private readonly prisma: PrismaService,
-    @Optional() private readonly dispatchTrigger?: DispatchTriggerService,
+    private readonly payments: PaymentsService,
+    @Inject(paymentConfig.KEY)
+    private readonly config: ConfigType<typeof paymentConfig>,
   ) {}
 
   list(): Promise<WebhookEvent[]> {
@@ -37,11 +51,89 @@ export class WebhooksService {
     });
   }
 
+  /**
+   * Provider webhooks are public, so nothing in the body is trusted: the body
+   * only says "go look". CardNET payments are re-queried against CardNET with
+   * the session key we stored (same path as the return URL), and Azul has no
+   * verification API yet, so its events are recorded but never change state.
+   */
   async receiveProvider(
-    provider: 'cardnet' | 'azul',
+    provider: WebhookProvider,
     payload: Record<string, unknown>,
-    signature?: string,
-  ): Promise<WebhookEvent> {
+    signature: string | undefined,
+    rawBody: Buffer | undefined,
+  ): Promise<WebhookAck> {
+    const signatureVerified = this.verifySignature(
+      provider,
+      signature,
+      rawBody,
+    );
+
+    if (provider === 'azul') {
+      // Fail closed: without a secret anyone could fill the table.
+      if (!signatureVerified) {
+        throw new UnauthorizedException('Invalid webhook signature');
+      }
+
+      await this.recordEvent(provider, payload, signatureVerified);
+      return { received: true, processed: false };
+    }
+
+    return this.receiveCardnet(payload, signatureVerified);
+  }
+
+  private async receiveCardnet(
+    payload: Record<string, unknown>,
+    signatureVerified: boolean,
+  ): Promise<WebhookAck> {
+    const session =
+      optionalString(payload.SESSION) ??
+      optionalString(payload.Session) ??
+      optionalString(payload.session);
+
+    if (!session) {
+      return { received: true, processed: false };
+    }
+
+    const payment = await this.prisma.payment.findUnique({
+      where: { providerSessionId: session },
+      select: { id: true, paymentProvider: true },
+    });
+
+    // Unknown sessions are dropped without writing, so unauthenticated
+    // callers cannot grow webhook_events.
+    if (!payment || payment.paymentProvider !== 'cardnet') {
+      return { received: true, processed: false };
+    }
+
+    const event = await this.recordEvent('cardnet', payload, signatureVerified);
+
+    try {
+      const receipt =
+        await this.payments.verifyCardnetPaymentBySession(session);
+
+      if (event) {
+        await this.prisma.webhookEvent.update({
+          where: { id: event.id },
+          data: { processed: true, processedAt: new Date() },
+        });
+      }
+
+      return { received: true, processed: true, paymentStatus: receipt.status };
+    } catch (error) {
+      this.logger.warn(
+        `CardNET webhook verification failed for payment ${payment.id}: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+      return { received: true, processed: false };
+    }
+  }
+
+  /** Returns the new event, or null when this delivery was already stored. */
+  private async recordEvent(
+    provider: WebhookProvider,
+    payload: Record<string, unknown>,
+    signatureVerified: boolean,
+  ): Promise<WebhookEvent | null> {
     const externalEventId =
       optionalString(payload.externalEventId) ??
       optionalString(payload.eventId) ??
@@ -63,175 +155,63 @@ export class WebhooksService {
     });
 
     if (existing) {
-      return existing;
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      const event = await tx.webhookEvent.create({
-        data: {
-          eventType,
-          externalEventId: scopedExternalId,
-          payload: {
-            provider,
-            signaturePresent: Boolean(signature),
-            payload,
-          } as Prisma.InputJsonObject,
-          processed: false,
-          processedAt: new Date(),
-          createdAt: new Date(),
-        },
-      });
-
-      const payment = await this.findPaymentForWebhook(tx, payload);
-      const status = this.statusFromWebhook(payload);
-
-      if (!payment || !status) {
-        return event;
-      }
-
-      if (payment && status) {
-        await tx.payment.update({
-          where: { id: payment.id },
-          data: {
-            status,
-            ...(status === PAYMENT_STATUS.PAID && { paidAt: new Date() }),
-          },
-        });
-
-        await tx.transportOrder.update({
-          where: { id: payment.orderId },
-          data: { paymentStatus: status },
-        });
-
-        if (status === PAYMENT_STATUS.PAID) {
-          await tx.transportOrder.updateMany({
-            where: {
-              id: payment.orderId,
-              status: {
-                in: [
-                  STATUS_ORDERS.DRAFT,
-                  STATUS_ORDERS.PENDING_QUOTE,
-                  STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION,
-                  STATUS_ORDERS.PENDING_PAYMENT,
-                  STATUS_ORDERS.CONFIRMED,
-                ],
-              },
-            },
-            data: { status: STATUS_ORDERS.REQUESTED },
-          });
-          this.dispatchTrigger?.orderMaybeDispatchable(payment.orderId);
-        }
-
-        await tx.paymentTransaction.create({
-          data: {
-            paymentId: payment.id,
-            transactionType:
-              status === PAYMENT_STATUS.REFUNDED
-                ? PAYMENT_TRANSACTIONS_TYPE.REFUND
-                : PAYMENT_TRANSACTIONS_TYPE.CAPTURE,
-            amount: payment.amount,
-            status:
-              status === PAYMENT_STATUS.FAILED
-                ? PAYMENTS_TRANSACTIONS_STATUS.FAILED
-                : PAYMENTS_TRANSACTIONS_STATUS.SUCCESS,
-            providerResponse: payload as Prisma.InputJsonObject,
-          },
-        });
-      }
-
-      return tx.webhookEvent.update({
-        where: { id: event.id },
-        data: { processed: true, processedAt: new Date() },
-      });
-    });
-  }
-
-  private async findPaymentForWebhook(
-    tx: Prisma.TransactionClient,
-    payload: Record<string, unknown>,
-  ) {
-    const paymentId =
-      optionalString(payload.paymentId) ?? optionalString(payload.PaymentId);
-
-    if (paymentId) {
-      const payment = await tx.payment.findUnique({ where: { id: paymentId } });
-
-      if (payment) {
-        return payment;
-      }
-    }
-
-    const providerReference =
-      optionalString(payload.SESSION) ??
-      optionalString(payload.Session) ??
-      optionalString(payload.session) ??
-      optionalString(payload.providerReference) ??
-      optionalString(payload.transactionId) ??
-      optionalString(payload.TransactionId) ??
-      optionalString(payload.TransactionID) ??
-      optionalString(payload.reference) ??
-      optionalString(payload.Reference);
-
-    const orderCode =
-      optionalString(payload.OrdenID) ??
-      optionalString(payload.OrdenId) ??
-      optionalString(payload.orderCode) ??
-      optionalString(payload.orderId);
-
-    if (providerReference) {
-      const payment = await tx.payment.findFirst({
-        where: {
-          OR: [
-            { providerReference },
-            { providerSessionId: providerReference },
-            { transactionId: providerReference },
-          ],
-        },
-      });
-
-      if (payment) {
-        return payment;
-      }
-    }
-
-    if (!orderCode) {
       return null;
     }
 
-    return tx.payment.findFirst({
-      where: { order: { orderCode } },
-      orderBy: { createdAt: 'desc' },
+    return this.prisma.webhookEvent.create({
+      data: {
+        eventType,
+        externalEventId: scopedExternalId,
+        payload: {
+          provider,
+          signatureVerified,
+          payload,
+        } as Prisma.InputJsonObject,
+        processed: false,
+        processedAt: new Date(),
+        createdAt: new Date(),
+      },
     });
   }
 
-  private statusFromWebhook(
-    payload: Record<string, unknown>,
-  ): PAYMENT_STATUS | undefined {
-    const status = (
-      optionalString(payload.status) ??
-      optionalString(payload.Status) ??
-      optionalString(payload.ResponseCode) ??
-      optionalString(payload.responseCode) ??
-      optionalString(payload.RemoteResponseCode) ??
-      ''
-    ).toLowerCase();
+  /**
+   * HMAC-SHA256 of the raw body, hex, optionally prefixed with "sha256=".
+   * With a secret configured a bad or missing signature is rejected; without
+   * one the request is accepted but reported as unverified.
+   */
+  private verifySignature(
+    provider: WebhookProvider,
+    signature: string | undefined,
+    rawBody: Buffer | undefined,
+  ): boolean {
+    const secret =
+      provider === 'cardnet'
+        ? this.config.cardnetWebhookSecret
+        : this.config.azulWebhookSecret;
 
-    if (['paid', 'approved', 'success', 'captured', '00'].includes(status)) {
-      return PAYMENT_STATUS.PAID;
+    if (!secret) {
+      return false;
     }
 
-    if (['authorized', 'auth'].includes(status)) {
-      return PAYMENT_STATUS.AUTHORIZED;
+    const provided = signature
+      ?.trim()
+      .replace(/^sha256=/i, '')
+      .toLowerCase();
+
+    if (!provided || !rawBody || !/^[0-9a-f]+$/.test(provided)) {
+      throw new UnauthorizedException('Invalid webhook signature');
     }
 
-    if (['refunded', 'refund'].includes(status)) {
-      return PAYMENT_STATUS.REFUNDED;
+    const expected = createHmac('sha256', secret).update(rawBody).digest();
+    const received = Buffer.from(provided, 'hex');
+
+    if (
+      received.length !== expected.length ||
+      !timingSafeEqual(received, expected)
+    ) {
+      throw new UnauthorizedException('Invalid webhook signature');
     }
 
-    if (['failed', 'declined', 'error', 'rejected'].includes(status)) {
-      return PAYMENT_STATUS.FAILED;
-    }
-
-    return undefined;
+    return true;
   }
 }

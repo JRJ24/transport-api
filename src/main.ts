@@ -15,6 +15,9 @@ import { appConfig } from './config';
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     bufferLogs: true,
+    // Keeps req.rawBody so provider webhooks can check their HMAC against
+    // the exact bytes that were signed.
+    rawBody: true,
   });
 
   app.useLogger(app.get(Logger));
