@@ -7,5 +7,6 @@ import { PaymentProviderRegistry } from './providers/payment-provider.registry';
 @Module({
   controllers: [PaymentsController],
   providers: [PaymentsService, PaymentProviderRegistry, CardnetGateway],
+  exports: [PaymentsService],
 })
 export class PaymentsModule {}
