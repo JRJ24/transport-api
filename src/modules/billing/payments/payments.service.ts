@@ -6,6 +6,7 @@ import {
   ForbiddenException,
   Inject,
   Injectable,
+  Logger,
   NotFoundException,
   Optional,
 } from '@nestjs/common';
@@ -22,6 +23,7 @@ import {
   PAYMENT_METHOD,
   PAYMENT_STATUS,
   PAYMENT_TRANSACTIONS_TYPE,
+  PAYMENTS_REFUND_STATUS,
   PAYMENTS_TRANSACTIONS_STATUS,
   ROLES,
   STATUS_ORDERS,
@@ -30,6 +32,7 @@ import {
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { DispatchTriggerService } from '@/modules/operations/offers/dispatch-trigger.service';
+import { NotificationDispatcherService } from '@/modules/support/notifications/notification-dispatcher.service';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { paymentConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
@@ -65,6 +68,25 @@ const ORDER_STATUSES_AWAITING_PAYMENT = new Set<STATUS_ORDERS>([
   STATUS_ORDERS.PENDING_CUSTOMER_CONFIRMATION,
   STATUS_ORDERS.PENDING_PAYMENT,
   STATUS_ORDERS.CONFIRMED,
+]);
+
+/**
+ * Where a customer may start a payment: the price is final and nobody has
+ * cancelled the trip. A PENDING_QUOTE total is only preliminary, and a
+ * CANCELLED/FAILED/DELIVERED order must never be charged again (LOG-API-001).
+ */
+const CUSTOMER_PAYABLE_ORDER_STATUSES = new Set<STATUS_ORDERS>([
+  STATUS_ORDERS.PENDING_PAYMENT,
+  STATUS_ORDERS.CONFIRMED,
+]);
+
+/**
+ * Staff registers checks and corporate credit from the portal at other points
+ * of the flow (TMS drafts, post-paid deliveries), but never on a closed order.
+ */
+const CLOSED_ORDER_STATUSES = new Set<STATUS_ORDERS>([
+  STATUS_ORDERS.CANCELLED,
+  STATUS_ORDERS.FAILED,
 ]);
 
 type CardnetOrder = Prisma.TransportOrderGetPayload<{
@@ -134,6 +156,8 @@ export interface PaymentReceiptResult {
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly providers: PaymentProviderRegistry,
@@ -141,6 +165,7 @@ export class PaymentsService {
     @Inject(paymentConfig.KEY)
     private readonly paymentsConfig: ConfigType<typeof paymentConfig>,
     @Optional() private readonly dispatchTrigger?: DispatchTriggerService,
+    @Optional() private readonly notifications?: NotificationDispatcherService,
   ) {}
 
   list(): Promise<Payment[]> {
@@ -221,6 +246,7 @@ export class PaymentsService {
       });
     }
 
+    this.assertOrderAcceptsPayment(order, user);
     this.assertOrderNotAlreadyDispatchable(order);
 
     const amount = this.payableAmount(order, dto.amount);
@@ -290,6 +316,7 @@ export class PaymentsService {
     user: AuthenticatedUser,
   ): Promise<CreatePaymentResult> {
     const order = await this.loadPayableOrder(dto.orderId);
+    this.assertOrderAcceptsPayment(order, user);
     this.assertOrderNotAlreadyDispatchable(order);
 
     const amount = this.payableAmount(order, dto.amount);
@@ -394,6 +421,7 @@ export class PaymentsService {
       });
     }
 
+    this.assertOrderAcceptsPayment(order, user);
     this.assertOrderNotAlreadyDispatchable(order);
 
     const amount = this.payableAmount(order, dto.amount);
@@ -515,6 +543,10 @@ export class PaymentsService {
         message: 'Order not found',
       });
     }
+
+    // Before the reuse below too: a session opened while the order was still
+    // payable must not be handed out again once it is cancelled.
+    this.assertOrderAcceptsPayment(order, user);
 
     if (
       order.paymentStatus === PAYMENT_STATUS.PAID ||
@@ -718,56 +750,78 @@ export class PaymentsService {
     const status = this.paymentStatusFromCardnetResponse(responseCode);
     const verifiedAt = new Date();
 
-    const updated = await this.prisma.$transaction(async (tx) => {
-      const updatedPayment = await tx.payment.update({
-        where: { id: payment.id },
-        data: {
-          status,
-          responseCode: responseCode ?? null,
-          remoteResponseCode:
-            this.pickString(
-              result,
-              'RemoteResponseCode',
-              'remoteResponseCode',
-            ) ?? null,
-          authorizationCode:
-            this.pickString(result, 'AuthorizationCode', 'authorizationCode') ??
-            null,
-          retrievalReferenceNumber:
-            this.pickString(
-              result,
-              'RetrivalReferenceNumber',
-              'RetrievalReferenceNumber',
-              'retrievalReferenceNumber',
-            ) ?? null,
-          transactionToken:
-            this.pickString(result, 'TxToken', 'txToken') ?? null,
-          maskedCardNumber:
-            this.pickString(
-              result,
-              'CreditCardNumber',
-              'CreditcardNumber',
-              'creditCardNumber',
-            ) ?? null,
-          verifiedAt,
-          ...(status === PAYMENT_STATUS.PAID && { paidAt: verifiedAt }),
-        },
-      });
+    const [updated, refundReason] = await this.prisma.$transaction(
+      async (tx) => {
+        const updatedPayment = await tx.payment.update({
+          where: { id: payment.id },
+          data: {
+            status,
+            responseCode: responseCode ?? null,
+            remoteResponseCode:
+              this.pickString(
+                result,
+                'RemoteResponseCode',
+                'remoteResponseCode',
+              ) ?? null,
+            authorizationCode:
+              this.pickString(
+                result,
+                'AuthorizationCode',
+                'authorizationCode',
+              ) ?? null,
+            retrievalReferenceNumber:
+              this.pickString(
+                result,
+                'RetrivalReferenceNumber',
+                'RetrievalReferenceNumber',
+                'retrievalReferenceNumber',
+              ) ?? null,
+            transactionToken:
+              this.pickString(result, 'TxToken', 'txToken') ?? null,
+            maskedCardNumber:
+              this.pickString(
+                result,
+                'CreditCardNumber',
+                'CreditcardNumber',
+                'creditCardNumber',
+              ) ?? null,
+            verifiedAt,
+            ...(status === PAYMENT_STATUS.PAID && { paidAt: verifiedAt }),
+          },
+        });
 
-      await tx.paymentTransaction.create({
-        data: {
-          paymentId: payment.id,
-          transactionType: PAYMENT_TRANSACTIONS_TYPE.CAPTURE,
-          amount: payment.amount,
-          status: this.transactionStatusFromPaymentStatus(status),
-          providerResponse: result as Prisma.InputJsonObject,
-        },
-      });
+        await tx.paymentTransaction.create({
+          data: {
+            paymentId: payment.id,
+            transactionType: PAYMENT_TRANSACTIONS_TYPE.CAPTURE,
+            amount: payment.amount,
+            status: this.transactionStatusFromPaymentStatus(status),
+            providerResponse: result as Prisma.InputJsonObject,
+          },
+        });
 
-      await this.syncOrderAfterPayment(tx, updatedPayment);
+        // CardNET already took the money, so the payment is PAID whatever the
+        // order looks like now. What changes is whether the order may use it:
+        // a capture on a cancelled or already covered order is set aside for a
+        // refund instead of reviving or double-charging the order.
+        const reason =
+          status === PAYMENT_STATUS.PAID
+            ? await this.rejectedCaptureReason(tx, updatedPayment)
+            : null;
 
-      return updatedPayment;
-    });
+        if (reason) {
+          await this.requestRefundForCapture(tx, updatedPayment, reason);
+        } else {
+          await this.syncOrderAfterPayment(tx, updatedPayment);
+        }
+
+        return [updatedPayment, reason] as const;
+      },
+    );
+
+    if (refundReason) {
+      this.alertCaptureNeedsRefund(payment.order, updated, refundReason);
+    }
 
     return this.toReceipt({ ...payment, ...updated });
   }
@@ -899,6 +953,136 @@ export class PaymentsService {
     return order;
   }
 
+  private assertOrderAcceptsPayment(
+    order: { status: STATUS_ORDERS },
+    user?: AuthenticatedUser,
+  ): void {
+    const accepts =
+      user && isStaff(user)
+        ? !CLOSED_ORDER_STATUSES.has(order.status)
+        : CUSTOMER_PAYABLE_ORDER_STATUSES.has(order.status);
+
+    if (!accepts) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message: `Order in status ${order.status} cannot be paid`,
+      });
+    }
+  }
+
+  /**
+   * Why a confirmed CardNET capture cannot be applied to its order, or null
+   * when it can. Read inside the capture transaction, so it sees a cancel or
+   * another payment that landed while the customer was on CardNET's page.
+   */
+  private async rejectedCaptureReason(
+    tx: Prisma.TransactionClient,
+    payment: Pick<Payment, 'id' | 'orderId'>,
+  ): Promise<string | null> {
+    const order = await tx.transportOrder.findUnique({
+      where: { id: payment.orderId },
+      select: {
+        status: true,
+        totalAmount: true,
+        payments: {
+          where: { id: { not: payment.id } },
+          select: { amount: true, paymentMethod: true, status: true },
+        },
+      },
+    });
+
+    if (!order) {
+      return 'CardNET capture for a missing order';
+    }
+
+    if (!CUSTOMER_PAYABLE_ORDER_STATUSES.has(order.status)) {
+      return `CardNET capture received while the order was ${order.status}`;
+    }
+
+    const totalAmount = Number(order.totalAmount);
+    if (
+      Number.isFinite(totalAmount) &&
+      totalAmount > 0 &&
+      this.dispatchAuthorizedAmount(order.payments) >= totalAmount
+    ) {
+      return 'Duplicate CardNET capture: the order was already covered by another payment';
+    }
+
+    return null;
+  }
+
+  /** One pending refund per capture, for operations to return via CardNET. */
+  private async requestRefundForCapture(
+    tx: Prisma.TransactionClient,
+    payment: Pick<Payment, 'id' | 'orderId' | 'amount'>,
+    reason: string,
+  ): Promise<void> {
+    const existing = await tx.refund.findFirst({
+      where: { paymentId: payment.id },
+      select: { id: true },
+    });
+
+    if (existing) {
+      return;
+    }
+
+    await tx.refund.create({
+      data: {
+        paymentId: payment.id,
+        orderId: payment.orderId,
+        amount: payment.amount,
+        reason,
+        status: PAYMENTS_REFUND_STATUS.PENDING,
+        providerReference: null,
+        createdAt: new Date(),
+      },
+    });
+  }
+
+  /** Best-effort: the refund row is the durable record, this is the nudge. */
+  private alertCaptureNeedsRefund(
+    order: Pick<TransportOrder, 'id' | 'orderCode'>,
+    payment: Pick<Payment, 'id' | 'amount'>,
+    reason: string,
+  ): void {
+    this.logger.error(
+      `CardNET payment ${payment.id} on order ${order.orderCode} needs a refund: ${reason}`,
+    );
+
+    const notifications = this.notifications;
+    if (!notifications) {
+      return;
+    }
+
+    const message = `Reembolso pendiente: cobro CardNET de RD$${Number(payment.amount).toFixed(2)} en la orden ${order.orderCode} no se puede aplicar (${reason}).`;
+
+    void this.prisma.user
+      .findMany({
+        where: {
+          userRoles: {
+            some: { rol: { code: { in: [ROLES.ADMIN, ROLES.OPERATOR] } } },
+          },
+        },
+        select: { id: true },
+      })
+      .then((staff) =>
+        Promise.allSettled(
+          staff.map((member) =>
+            notifications.dispatch(member.id, 'OPERATOR_MESSAGE', {
+              orderId: order.id,
+              orderCode: order.orderCode,
+              message,
+            }),
+          ),
+        ),
+      )
+      .catch((error: unknown) =>
+        this.logger.error(
+          `Failed to alert staff about refund for payment ${payment.id}: ${error instanceof Error ? error.message : 'unknown'}`,
+        ),
+      );
+  }
+
   private payableAmount(
     order: {
       totalAmount: unknown;
@@ -985,8 +1169,13 @@ export class PaymentsService {
       Number.isFinite(totalAmount) &&
       totalAmount > 0 &&
       this.dispatchAuthorizedAmount(order.payments) >= totalAmount;
-    const hasAuthorizedManual = order.payments.some((candidate) =>
-      this.isDispatchAuthorizedPayment(candidate),
+    // Only a check or corporate credit that is authorized but not yet
+    // collected leaves the order AUTHORIZED. isDispatchAuthorizedPayment also
+    // counts PAID, which made an order paid in full by card AUTHORIZED too.
+    const hasAuthorizedManual = order.payments.some(
+      (candidate) =>
+        candidate.status === PAYMENT_STATUS.AUTHORIZED &&
+        DISPATCHABLE_MANUAL_METHODS.has(candidate.paymentMethod),
     );
     const hasProcessing = order.payments.some(
       (candidate) =>
