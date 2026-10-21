@@ -380,6 +380,8 @@ export class PricingService {
         destinationAddress: dto.destinationAddress.trim(),
         distanceKm,
         estimatedDurationMin,
+        // Priced by the system from the route, not a staff PROVISIONAL quote.
+        quoteStatus: QUOTE_STATUS.CALCULATED,
         ...amounts,
         // Snapshot of every input, so the order reproduces its price even
         // after the rate card or the demand rules change.

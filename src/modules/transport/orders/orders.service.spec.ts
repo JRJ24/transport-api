@@ -3,6 +3,7 @@ import {
   OFFER_MODE,
   OFFER_STATUS,
   ORDER_CANCELLATION,
+  QUOTE_STATUS,
   SERVICE_TYPE,
   STATUS_DRIVER,
   STATUS_ORDERS,
@@ -153,7 +154,12 @@ function setup(options: SetupOptions = {}) {
     orderEvent: { create: jest.fn().mockResolvedValue({}) },
     orderCancellation: { create: jest.fn().mockResolvedValue({}) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
-    priceQuote: { update: jest.fn().mockResolvedValue({}) },
+    priceQuote: {
+      update: jest.fn().mockResolvedValue({}),
+      findFirst: jest.fn().mockResolvedValue(null),
+      // claimQuote: the compare-and-set that spends the quote.
+      updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+    },
     orderAssignment: {
       findFirst: jest.fn().mockResolvedValue({ id: 'asg-1', driverId: 'd1' }),
       findMany: jest.fn().mockResolvedValue(live),
@@ -1124,6 +1130,8 @@ describe('OrdersService.create quote binding (SEC-API-002)', () => {
       estimatedDurationMin: 150,
       totalAmount: 9000,
       expiresAt: new Date(Date.now() + 60_000),
+      orderId: null as string | null,
+      quoteStatus: QUOTE_STATUS.CALCULATED,
       breakdown,
       vehicleCategory: { maxWeightKg: 1000, maxVolumenM3: 10 },
     };
@@ -1248,5 +1256,112 @@ describe('OrdersService.create quote binding (SEC-API-002)', () => {
       service.create(customerUser, orderDto(matchingStops, true)),
     ).rejects.toMatchObject({ status: 400 });
     expect(tx.transportOrder.create).not.toHaveBeenCalled();
+  });
+
+  // LOG-API-005: one quote, one order.
+  it('spends the quote: binds it to the new order and marks it ACCEPTED', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({ route: quotedRoute }),
+    );
+
+    await service.create(customerUser, orderDto(matchingStops));
+
+    expect(tx.priceQuote.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'quote-1',
+        customerId: 'cust-1',
+        orderId: null,
+        quoteStatus: {
+          in: [
+            QUOTE_STATUS.PROVISIONAL,
+            QUOTE_STATUS.CALCULATED,
+            QUOTE_STATUS.SENT,
+          ],
+        },
+        expiresAt: { gt: expect.any(Date) as unknown },
+      },
+      data: { orderId: 'order-1', quoteStatus: QUOTE_STATUS.ACCEPTED },
+    });
+  });
+
+  it('refuses a quote another order already used', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue({
+      ...quote({ route: quotedRoute }),
+      orderId: 'order-0',
+      quoteStatus: QUOTE_STATUS.ACCEPTED,
+    });
+
+    await expect(
+      service.create(customerUser, orderDto(matchingStops)),
+    ).rejects.toMatchObject({ status: 409 });
+    expect(tx.transportOrder.create).not.toHaveBeenCalled();
+  });
+
+  it.each([QUOTE_STATUS.REPLACED, QUOTE_STATUS.REJECTED, QUOTE_STATUS.EXPIRED])(
+    'refuses a %s quote',
+    async (quoteStatus) => {
+      const { service, prisma, tx } = setup();
+      prisma.priceQuote.findFirst.mockResolvedValue({
+        ...quote({ route: quotedRoute }),
+        quoteStatus,
+      });
+
+      await expect(
+        service.create(customerUser, orderDto(matchingStops)),
+      ).rejects.toMatchObject({ status: 409 });
+      expect(tx.transportOrder.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('the second of two concurrent orders on one quote fails and rolls back', async () => {
+    const { service, prisma, tx } = setup();
+    prisma.priceQuote.findFirst.mockResolvedValue(
+      quote({ route: quotedRoute }),
+    );
+    // Both requests passed the early check; the first claim won.
+    tx.priceQuote.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      service.create(customerUser, orderDto(matchingStops)),
+    ).rejects.toMatchObject({ status: 409 });
+    // Thrown inside $transaction, so the order it created is rolled back,
+    // and nothing is announced.
+    expect(tx.priceQuote.updateMany).toHaveBeenCalled();
+  });
+
+  it('TMS cannot attach a quote another order already took', async () => {
+    const { service, prisma, tx } = setup();
+    (
+      prisma.customerProfile as unknown as { findUnique: jest.Mock }
+    ).findUnique.mockResolvedValue({
+      id: 'cust-1',
+      user: { status: 'ACTIVE' },
+    });
+    (prisma as unknown as { vehicleCategory: unknown }).vehicleCategory = {
+      findUnique: jest
+        .fn()
+        .mockResolvedValue({ maxWeightKg: 1000, maxVolumenM3: 10 }),
+    };
+    tx.priceQuote.findFirst.mockResolvedValue({
+      id: 'quote-1',
+      orderId: 'order-0',
+      distanceKm: 10,
+      estimatedDurationMin: 20,
+      totalAmount: 500,
+    });
+    tx.priceQuote.updateMany.mockResolvedValue({ count: 0 });
+
+    await expect(
+      service.createFromTms(operator, {
+        customerId: 'cust-1',
+        vehicleCategoryId: 'cat-1',
+        quoteId: 'quote-1',
+        serviceType: SERVICE_TYPE.INMEDIATE,
+        stops: matchingStops,
+        items: [{ description: 'Caja', quantity: 1, weightKg: 10 }],
+      } as never),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });

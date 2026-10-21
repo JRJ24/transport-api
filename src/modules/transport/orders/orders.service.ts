@@ -1,5 +1,6 @@
 import {
   BadRequestException,
+  ConflictException,
   ForbiddenException,
   Injectable,
   Logger,
@@ -195,6 +196,16 @@ function driverReadableAssignment(
  */
 const QUOTE_STOP_TOLERANCE_METERS = 150;
 
+/**
+ * A quote an order may still be created from. ACCEPTED belongs to an order
+ * already; REPLACED, REJECTED and EXPIRED are dead; DRAFT was never priced.
+ */
+const CONSUMABLE_QUOTE_STATUSES: QUOTE_STATUS[] = [
+  QUOTE_STATUS.PROVISIONAL,
+  QUOTE_STATUS.CALCULATED,
+  QUOTE_STATUS.SENT,
+];
+
 const SAFE_USER_SELECT = {
   id: true,
   fullName: true,
@@ -267,6 +278,15 @@ export class OrdersService {
       });
     }
 
+    // Early, readable refusal; the claim inside the transaction is what
+    // actually stops two concurrent orders from sharing the quote.
+    if (
+      quote.orderId !== null ||
+      !CONSUMABLE_QUOTE_STATUSES.includes(quote.quoteStatus)
+    ) {
+      throw this.quoteAlreadyUsed();
+    }
+
     if (dto.serviceType === SERVICE_TYPE.SCHEDULED && !dto.scheduleAt) {
       throw new BadRequestException({
         code: ERROR_CODES.BAD_REQUEST,
@@ -330,6 +350,9 @@ export class OrdersService {
         },
         include: ORDER_INCLUDE,
       });
+
+      // The customer accepts the price by ordering, so the quote is spent.
+      await this.claimQuote(tx, quote.id, customer.id, order.id, true);
 
       if (dto.serviceType === SERVICE_TYPE.SCHEDULED && dto.scheduleAt) {
         await tx.reservation.create({
@@ -532,11 +555,11 @@ export class OrdersService {
         });
       }
 
-      if (quote && !quote.orderId) {
-        await tx.priceQuote.update({
-          where: { id: quote.id },
-          data: { orderId: order.id },
-        });
+      // Same rule as the customer path: a quote another order already took
+      // (or a REPLACED/expired one) cannot price this one. It stays
+      // PROVISIONAL until the customer confirms it (confirmByCustomer).
+      if (quote) {
+        await this.claimQuote(tx, quote.id, dto.customerId, order.id, false);
       }
 
       return order;
@@ -1601,6 +1624,46 @@ export class OrdersService {
         message: 'Cargo volume exceeds the selected vehicle category capacity',
       });
     }
+  }
+
+  /**
+   * Binds the quote to the order it priced, once. A compare-and-set inside the
+   * order's transaction: two POST /orders racing on one quoteId both create an
+   * order, but only the first claim matches, and the other rolls back
+   * (LOG-API-005).
+   */
+  private async claimQuote(
+    tx: Prisma.TransactionClient,
+    quoteId: string,
+    customerId: string,
+    orderId: string,
+    accept: boolean,
+  ): Promise<void> {
+    const claimed = await tx.priceQuote.updateMany({
+      where: {
+        id: quoteId,
+        customerId,
+        orderId: null,
+        quoteStatus: { in: CONSUMABLE_QUOTE_STATUSES },
+        expiresAt: { gt: new Date() },
+      },
+      data: {
+        orderId,
+        ...(accept && { quoteStatus: QUOTE_STATUS.ACCEPTED }),
+      },
+    });
+
+    if (claimed.count !== 1) {
+      throw this.quoteAlreadyUsed();
+    }
+  }
+
+  private quoteAlreadyUsed(): ConflictException {
+    return new ConflictException({
+      code: ERROR_CODES.RESOURCE_CONFLICT,
+      message:
+        'Price quote was already used or is no longer valid; request a new quote',
+    });
   }
 
   /**
