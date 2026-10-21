@@ -11,7 +11,12 @@ import {
   ASSIGNMENT_STATUS,
   EVENT_TYPE,
   OFFER_STATUS,
+  ORDER_CANCELLATION,
+  PAYMENT_METHOD,
   PAYMENT_STATUS,
+  PAYMENT_TRANSACTIONS_TYPE,
+  PAYMENTS_REFUND_STATUS,
+  PAYMENTS_TRANSACTIONS_STATUS,
   QUOTE_STATUS,
   RESERVATIONS_STATUS,
   ROLES,
@@ -42,6 +47,14 @@ import {
   type ManualQuoteInput,
 } from '../pricing/pricing.service';
 import type { CreateOrderManualQuoteDto } from '../pricing/dto/manual-quote.dto';
+import {
+  CUSTOMER_CANCELLABLE_STATUSES,
+  STAFF_CANCELLATION_TYPES,
+  cancellationFee,
+  collectedAmount,
+  isCollected,
+  roundMoney,
+} from './cancellation-policy';
 import type { CancelOrderDto } from './dto/cancel-order.dto';
 import type { ClaimOrderDto } from './dto/claim-order.dto';
 import type { CreateOrderDto } from './dto/create-order.dto';
@@ -883,6 +896,22 @@ export class OrdersService {
 
     await this.assertDriverCanAccessOrder(user, id);
     this.assertStatusTransition(user, current.status, dto.status);
+
+    // CANCELLED through the status PATCH (the portal's status selector) used
+    // to skip the cancellation record and leave the payment collected with
+    // nothing refunded. It is the same act as POST /orders/:id/cancel, so it
+    // goes through it. Drivers never get here: the transition check refuses
+    // them CANCELLED.
+    if (
+      dto.status === STATUS_ORDERS.CANCELLED &&
+      current.status !== STATUS_ORDERS.CANCELLED
+    ) {
+      return this.cancel(user, id, {
+        cancellationType: ORDER_CANCELLATION.ADMIN_CANCELLED,
+        reason: 'Cancelled by operations from the order status',
+      });
+    }
+
     await this.assertDriverHoldsOrder(user, id);
     if (dto.status === STATUS_ORDERS.DELIVERED) {
       await this.assertDeliveryEvidenceReady(id);
@@ -1120,7 +1149,13 @@ export class OrdersService {
   ): Promise<TransportOrder> {
     const current = await this.prisma.transportOrder.findUnique({
       where: { id },
-      select: { status: true, paymentStatus: true, customerId: true },
+      select: {
+        status: true,
+        paymentStatus: true,
+        customerId: true,
+        vehicleCategoryId: true,
+        quote: { select: { breakdown: true } },
+      },
     });
 
     if (!current) {
@@ -1132,24 +1167,67 @@ export class OrdersService {
 
     await this.assertCanReadOrder(user, current.customerId);
 
+    const staff = this.isStaff(user);
+    // Terminal orders (DELIVERED, FAILED, CANCELLED) have no way out, for
+    // anybody: a delivered, billed trip cannot be un-done by a cancel.
+    // assertStatusTransition lets X -> X through as a no-op, so a repeated
+    // cancel is refused here: it would record and refund a second time.
+    if (current.status === STATUS_ORDERS.CANCELLED) {
+      throw new DomainException(
+        ERROR_CODES.DOMAIN_RULE_VIOLATION,
+        'Illegal order status transition: order is already cancelled',
+      );
+    }
+    this.assertStatusTransition(user, current.status, STATUS_ORDERS.CANCELLED);
+    if (!staff && !CUSTOMER_CANCELLABLE_STATUSES.has(current.status)) {
+      throw new DomainException(
+        ERROR_CODES.DOMAIN_RULE_VIOLATION,
+        'The trip already started; contact operations to cancel it',
+      );
+    }
+    const cancellationType = this.cancellationTypeFor(user, dto);
+    const reason = dto.reason.trim();
+    const ruleFee =
+      cancellationType === ORDER_CANCELLATION.CUSTOMER_CANCELLED
+        ? await this.pricing.cancellationFeeFor(current)
+        : 0;
+
     const now = new Date();
     const releasedDriverIds: string[] = [];
     const order = await this.prisma.$transaction(async (tx) => {
-      await tx.transportOrder.update({
-        where: { id },
+      // Compare-and-set on the status read above: a driver starting the trip
+      // (ACCEPTED -> IN_PROGRESS) at the same moment wins, and the customer
+      // gets a conflict instead of cancelling a loaded truck.
+      const moved = await tx.transportOrder.updateMany({
+        where: { id, status: current.status },
         data: { status: STATUS_ORDERS.CANCELLED },
       });
+      if (moved.count !== 1) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'The order changed while cancelling it; reload and retry',
+        });
+      }
       releasedDriverIds.push(...(await this.releaseOrderDrivers(tx, id, now)));
+
+      const settlement = await this.settleCancelledPayments(tx, {
+        orderId: id,
+        status: current.status,
+        cancellationType,
+        ruleFee,
+        reason,
+        actorUserId: user.id,
+      });
 
       await tx.orderCancellation.create({
         data: {
           orderId: id,
           cancelledBy: user.id,
-          cancellationReason: dto.reason.trim(),
-          cancellationType: dto.cancellationType,
-          feeApplied: false,
-          feeAmount: 0,
-          refundAmount: 0,
+          cancellationReason: reason,
+          cancellationType,
+          feeApplied: settlement.feeAmount > 0,
+          feeAmount: settlement.feeAmount,
+          refundAmount: settlement.refundAmount,
         },
       });
 
@@ -1158,9 +1236,12 @@ export class OrdersService {
           orderId: id,
           eventType: EVENT_TYPE.CANCELLED,
           actorUserId: user.id,
-          description: dto.reason.trim(),
+          description: reason,
           metadata: {
-            cancellationType: dto.cancellationType,
+            cancellationType,
+            previousStatus: current.status,
+            feeAmount: settlement.feeAmount,
+            refundAmount: settlement.refundAmount,
           },
           latitude: null,
           longitude: 0,
@@ -1179,8 +1260,8 @@ export class OrdersService {
           },
           newValues: {
             status: STATUS_ORDERS.CANCELLED,
-            cancellationType: dto.cancellationType,
-            reason: dto.reason.trim(),
+            cancellationType,
+            reason,
           },
           ipAddress: null,
           userAgent: null,
@@ -1200,6 +1281,7 @@ export class OrdersService {
     this.realtime.emitOrderStatusChanged({
       orderId: id,
       status: STATUS_ORDERS.CANCELLED,
+      previousStatus: current.status,
       changedByUserId: user.id,
       changedAt: now.toISOString(),
       driverIds: releasedDriverIds,
@@ -1500,6 +1582,198 @@ export class OrdersService {
         (role) => role === ROLES.ADMIN || role === ROLES.OPERATOR,
       )
     );
+  }
+
+  private isStaff(user: AuthenticatedUser): boolean {
+    return user.roles.some(
+      (role) => role === ROLES.ADMIN || role === ROLES.OPERATOR,
+    );
+  }
+
+  /**
+   * The cancellation type decides the fee, so it is not the caller's to pick:
+   * a customer is always CUSTOMER_CANCELLED (declaring ADMIN_CANCELLED dodged
+   * the fee); staff records who asked, never SYSTEM_CANCELLED.
+   */
+  private cancellationTypeFor(
+    user: AuthenticatedUser,
+    dto: CancelOrderDto,
+  ): ORDER_CANCELLATION {
+    if (!this.isStaff(user)) {
+      return ORDER_CANCELLATION.CUSTOMER_CANCELLED;
+    }
+    const requested =
+      dto.cancellationType ?? ORDER_CANCELLATION.ADMIN_CANCELLED;
+    if (!STAFF_CANCELLATION_TYPES.has(requested)) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: `${requested} is reserved for the platform`,
+      });
+    }
+    return requested;
+  }
+
+  /**
+   * What a cancelled order does with its money, in the cancel transaction:
+   * attempts still in flight are voided (a late CardNET capture then becomes
+   * a refund, see PaymentsService), the fee is kept from what was collected,
+   * and the rest goes back - corporate credit released at once, cards and
+   * checks as a PENDING refund for operations. Before this every cancel kept
+   * the whole payment with refundAmount 0.
+   */
+  private async settleCancelledPayments(
+    tx: Prisma.TransactionClient,
+    input: {
+      orderId: string;
+      status: STATUS_ORDERS;
+      cancellationType: ORDER_CANCELLATION;
+      ruleFee: number;
+      reason: string;
+      actorUserId: string;
+    },
+  ): Promise<{ feeAmount: number; refundAmount: number }> {
+    await tx.payment.updateMany({
+      where: {
+        orderId: input.orderId,
+        status: { in: [PAYMENT_STATUS.PENDING, PAYMENT_STATUS.PROCESSING] },
+      },
+      data: { status: PAYMENT_STATUS.CANCELLED },
+    });
+
+    const payments = await tx.payment.findMany({
+      where: { orderId: input.orderId },
+      orderBy: { createdAt: 'asc' },
+    });
+    const collected = payments.filter(isCollected);
+    const feeAmount = cancellationFee({
+      status: input.status,
+      cancellationType: input.cancellationType,
+      ruleFee: input.ruleFee,
+      collected: collectedAmount(collected),
+    });
+
+    let feeLeft = feeAmount;
+    let refundAmount = 0;
+    // Only credit settles inside this transaction; cards and checks wait for
+    // operations to return them (RefundsService flips the order then).
+    let stillHoldsMoney = false;
+    for (const payment of collected) {
+      const kept = roundMoney(Math.min(feeLeft, Number(payment.amount)));
+      feeLeft = roundMoney(feeLeft - kept);
+      const released = roundMoney(Number(payment.amount) - kept);
+
+      if (kept > 0) {
+        stillHoldsMoney = true;
+        await tx.paymentTransaction.create({
+          data: {
+            paymentId: payment.id,
+            transactionType: PAYMENT_TRANSACTIONS_TYPE.CANCELLATION_FEE,
+            amount: kept,
+            status: PAYMENTS_TRANSACTIONS_STATUS.SUCCESS,
+            providerResponse: {
+              cancellationType: input.cancellationType,
+              reason: input.reason,
+            },
+          },
+        });
+      }
+      if (released <= 0) {
+        continue;
+      }
+      refundAmount = roundMoney(refundAmount + released);
+
+      if (payment.paymentMethod === PAYMENT_METHOD.CORPORATE_CREDIT) {
+        await this.releaseCorporateCredit(tx, payment, kept, released, input);
+        continue;
+      }
+      stillHoldsMoney = true;
+
+      await tx.refund.create({
+        data: {
+          paymentId: payment.id,
+          orderId: input.orderId,
+          amount: released,
+          reason: `Order cancelled (${input.cancellationType}): ${input.reason}`,
+          status: PAYMENTS_REFUND_STATUS.PENDING,
+          providerReference: null,
+          createdAt: new Date(),
+        },
+      });
+    }
+
+    // Everything collected was credit and all of it went back to the line.
+    if (collected.length > 0 && !stillHoldsMoney) {
+      await tx.transportOrder.update({
+        where: { id: input.orderId },
+        data: { paymentStatus: PAYMENT_STATUS.REFUNDED },
+      });
+    }
+
+    return { feeAmount, refundAmount };
+  }
+
+  /**
+   * Gives the credit line back what the cancelled trip had reserved. The
+   * authorization is left owing exactly the fee kept (or nothing, REFUNDED),
+   * so the payment no longer claims the full trip on the customer's credit.
+   */
+  private async releaseCorporateCredit(
+    tx: Prisma.TransactionClient,
+    payment: { id: string; customerId: string; amount: unknown },
+    kept: number,
+    released: number,
+    input: { orderId: string; reason: string; actorUserId: string },
+  ): Promise<void> {
+    const account = await tx.customerCreditAccount.findUnique({
+      where: { customerId: payment.customerId },
+      select: { id: true },
+    });
+    if (!account) {
+      return;
+    }
+
+    await tx.customerCreditAccount.update({
+      where: { id: account.id },
+      data: { balanceUsed: { decrement: released } },
+    });
+    const after = await tx.customerCreditAccount.findUniqueOrThrow({
+      where: { id: account.id },
+      select: { balanceUsed: true },
+    });
+    await tx.customerCreditMovement.create({
+      data: {
+        creditAccountId: account.id,
+        orderId: input.orderId,
+        paymentId: payment.id,
+        movementType: 'REFUND',
+        amount: released,
+        balanceAfter: after.balanceUsed,
+        createdBy: input.actorUserId,
+        notes: `Order cancelled: ${input.reason}`,
+      },
+    });
+
+    await tx.paymentTransaction.create({
+      data: {
+        paymentId: payment.id,
+        transactionType: PAYMENT_TRANSACTIONS_TYPE.REFUND,
+        amount: released,
+        status: PAYMENTS_TRANSACTIONS_STATUS.SUCCESS,
+        providerResponse: {
+          creditAccountId: account.id,
+          releasedFrom: Number(payment.amount),
+          kept,
+        },
+      },
+    });
+
+    // Fully released: nothing is owed on this authorization any more. With a
+    // fee kept, the authorization shrinks to it (the original amount stays in
+    // the AUTHORIZATION transaction).
+    await tx.payment.update({
+      where: { id: payment.id },
+      data: kept > 0 ? { amount: kept } : { status: PAYMENT_STATUS.REFUNDED },
+    });
   }
 
   private isDriverOnly(user: AuthenticatedUser): boolean {

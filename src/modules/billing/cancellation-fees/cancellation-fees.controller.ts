@@ -22,7 +22,9 @@ export class CancellationFeesController {
    * regla de "orden propia" que la evidencia, antes de buscar la orden (un id
    * ajeno y uno inexistente dan el mismo 403; staff sigue viendo el 404).
    */
-  @ApiOperation({ summary: 'Calculate internal/mock cancellation fee' })
+  @ApiOperation({
+    summary: 'Preview what cancelling the order would cost the customer',
+  })
   @Roles(ROLES.ADMIN, ROLES.OPERATOR, ROLES.CUSTOMER)
   @Get('orders/:orderId')
   async calculate(
@@ -32,6 +34,6 @@ export class CancellationFeesController {
     await this.access.assertOrderAccess(user, orderId, {
       message: 'You cannot access this order',
     });
-    return this.service.calculate(orderId);
+    return this.service.calculate(orderId, user);
   }
 }
