@@ -15,6 +15,7 @@ import type {
 } from '@generated/prisma/client';
 import {
   CREDIT_ACCOUNT_STATUS,
+  PAYMENT_STATUS,
   ROLES,
   STATUS_ACCOUNT,
   TYPE_CUSTOMER,
@@ -47,6 +48,20 @@ const SAFE_USER_SELECT = {
   createdAt: true,
   updatedAt: true,
 } as const;
+
+/** A credit line in these states was evaluated for one specific company. */
+const LIVE_CREDIT_STATUSES: CREDIT_ACCOUNT_STATUS[] = [
+  CREDIT_ACCOUNT_STATUS.PENDING,
+  CREDIT_ACCOUNT_STATUS.ACTIVE,
+  CREDIT_ACCOUNT_STATUS.BLOCKED,
+];
+
+/** A payment in these states means a receipt went out under the document. */
+const BILLED_PAYMENT_STATUSES: PAYMENT_STATUS[] = [
+  PAYMENT_STATUS.PAID,
+  PAYMENT_STATUS.AUTHORIZED,
+  PAYMENT_STATUS.REFUNDED,
+];
 
 @Injectable()
 export class CustomersService {
@@ -697,6 +712,24 @@ export class CustomersService {
 
     this.assertBusinessHasCompanyName(nextCustomerType, nextCompanyName);
 
+    // Compared with what is stored, so a client that re-sends the whole form
+    // unchanged is not refused.
+    const nextDocumentNumber =
+      dto.documentNumber !== undefined
+        ? dto.documentNumber.trim()
+        : profile.documentNumber;
+    const storedCompanyName =
+      nextCustomerType === TYPE_CUSTOMER.INDIVIDUAL ? null : nextCompanyName;
+    const changesFiscalIdentity =
+      nextCustomerType !== profile.customerType ||
+      (dto.documentType ?? profile.documentType) !== profile.documentType ||
+      nextDocumentNumber !== profile.documentNumber ||
+      storedCompanyName !== profile.companyName;
+
+    if (changesFiscalIdentity) {
+      await this.assertFiscalIdentityEditable(profile.id);
+    }
+
     return this.prisma.$transaction(async (tx) => {
       const updated = await tx.customerProfile.update({
         where: { id: profile.id },
@@ -733,8 +766,68 @@ export class CustomersService {
         );
       }
 
+      if (changesFiscalIdentity) {
+        await tx.auditLog.create({
+          data: {
+            actorUserId: userId,
+            action: 'CUSTOMER_FISCAL_IDENTITY_UPDATED',
+            entityType: 'CUSTOMER',
+            entityId: profile.id,
+            oldValues: {
+              customerType: profile.customerType,
+              documentType: profile.documentType,
+              documentNumber: profile.documentNumber,
+              companyName: profile.companyName,
+            },
+            newValues: {
+              customerType: updated.customerType,
+              documentType: updated.documentType,
+              documentNumber: updated.documentNumber,
+              companyName: updated.companyName,
+            },
+            ipAddress: null,
+            userAgent: null,
+            createdAt: new Date(),
+          },
+        });
+      }
+
       return updated;
     });
+  }
+
+  /**
+   * The document, company name and customer type are who the credit line was
+   * approved for and who the receipts were issued to. Once either exists the
+   * customer cannot swap them from the app: operations does it from the TMS
+   * (updateFromTms), which re-evaluates the credit and keeps an audit trail
+   * (LOG-API-003).
+   */
+  private async assertFiscalIdentityEditable(
+    customerId: string,
+  ): Promise<void> {
+    const [credit, billedPayments] = await Promise.all([
+      this.prisma.customerCreditAccount.findUnique({
+        where: { customerId },
+        select: { status: true, balanceUsed: true },
+      }),
+      this.prisma.payment.count({
+        where: { customerId, status: { in: BILLED_PAYMENT_STATUSES } },
+      }),
+    ]);
+
+    const hasLiveCredit =
+      credit !== null &&
+      (LIVE_CREDIT_STATUSES.includes(credit.status) ||
+        Number(credit.balanceUsed) > 0);
+
+    if (hasLiveCredit || billedPayments > 0) {
+      throw new ConflictException({
+        code: ERROR_CODES.RESOURCE_CONFLICT,
+        message:
+          'Customer type, document and company name cannot be changed once there is a credit line or billed orders; contact operations',
+      });
+    }
   }
 
   async listAddresses(userId: string): Promise<CustomerAddress[]> {
