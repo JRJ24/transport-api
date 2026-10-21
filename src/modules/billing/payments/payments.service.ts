@@ -89,6 +89,17 @@ const CLOSED_ORDER_STATUSES = new Set<STATUS_ORDERS>([
   STATUS_ORDERS.FAILED,
 ]);
 
+/**
+ * A payment in one of these states is settled: re-verifying with CardNET or a
+ * late cancel redirect must never move it again. CardNET keeps answering "00"
+ * for a refunded session, which used to turn REFUNDED back into PAID and put
+ * the order back in the dispatch queue (LOG-API-002).
+ */
+const TERMINAL_PAYMENT_STATUSES: PAYMENT_STATUS[] = [
+  PAYMENT_STATUS.PAID,
+  PAYMENT_STATUS.REFUNDED,
+];
+
 type CardnetOrder = Prisma.TransportOrderGetPayload<{
   include: {
     customer: {
@@ -697,7 +708,7 @@ export class PaymentsService {
       });
     }
 
-    if (payment.status === PAYMENT_STATUS.PAID) {
+    if (TERMINAL_PAYMENT_STATUSES.includes(payment.status)) {
       return this.toReceipt(payment);
     }
 
@@ -752,8 +763,14 @@ export class PaymentsService {
 
     const [updated, refundReason] = await this.prisma.$transaction(
       async (tx) => {
-        const updatedPayment = await tx.payment.update({
-          where: { id: payment.id },
+        // Conditional write: the return URL, the webhook and the cancel
+        // redirect can race on one session. Whoever settles it first wins and
+        // the others leave it alone instead of overwriting PAID/REFUNDED.
+        const claimed = await tx.payment.updateMany({
+          where: {
+            id: payment.id,
+            status: { notIn: TERMINAL_PAYMENT_STATUSES },
+          },
           data: {
             status,
             responseCode: responseCode ?? null,
@@ -789,6 +806,13 @@ export class PaymentsService {
             ...(status === PAYMENT_STATUS.PAID && { paidAt: verifiedAt }),
           },
         });
+        const updatedPayment = await tx.payment.findUniqueOrThrow({
+          where: { id: payment.id },
+        });
+
+        if (claimed.count === 0) {
+          return [updatedPayment, null] as const;
+        }
 
         await tx.paymentTransaction.create({
           data: {
@@ -838,18 +862,31 @@ export class PaymentsService {
       return null;
     }
 
-    if (payment.status === PAYMENT_STATUS.PAID) {
+    if (TERMINAL_PAYMENT_STATUSES.includes(payment.status)) {
       return this.toReceipt(payment);
     }
 
     const updated = await this.prisma.$transaction(async (tx) => {
-      const updatedPayment = await tx.payment.update({
-        where: { id: payment.id },
+      // Same guard as verify: a cancel redirect that arrives after the
+      // webhook already confirmed the charge must not turn PAID into
+      // CANCELLED.
+      const claimed = await tx.payment.updateMany({
+        where: {
+          id: payment.id,
+          status: { notIn: TERMINAL_PAYMENT_STATUSES },
+        },
         data: {
           status: PAYMENT_STATUS.CANCELLED,
           verifiedAt: new Date(),
         },
       });
+      const updatedPayment = await tx.payment.findUniqueOrThrow({
+        where: { id: payment.id },
+      });
+
+      if (claimed.count === 0) {
+        return updatedPayment;
+      }
 
       await this.syncOrderAfterPayment(tx, updatedPayment);
 
