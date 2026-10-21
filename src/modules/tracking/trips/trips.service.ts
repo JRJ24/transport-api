@@ -1,4 +1,5 @@
 import {
+  ConflictException,
   ForbiddenException,
   Injectable,
   NotFoundException,
@@ -33,7 +34,29 @@ export class TripsService {
     await this.assertDriverCanTrackOrder(user, driverId, dto.orderId);
 
     const session = await this.prisma.$transaction(async (tx) => {
-      const session = await tx.trackingSession.create({
+      // Compare-and-set, as in TrackingSessionsService: only ACCEPTED starts
+      // a trip. The old unconditional update let staff (who skip the
+      // assignment check) put a CANCELLED - already refunded - or DELIVERED
+      // order back IN_PROGRESS (LOG-API-008). A restart on an order already
+      // IN_PROGRESS keeps its pickupAt.
+      const moved = await tx.transportOrder.updateMany({
+        where: { id: dto.orderId, status: STATUS_ORDERS.ACCEPTED },
+        data: { status: STATUS_ORDERS.IN_PROGRESS, pickupAt: now },
+      });
+      if (moved.count === 0) {
+        const order = await tx.transportOrder.findUnique({
+          where: { id: dto.orderId },
+          select: { status: true },
+        });
+        if (order?.status !== STATUS_ORDERS.IN_PROGRESS) {
+          throw new ConflictException({
+            code: ERROR_CODES.RESOURCE_CONFLICT,
+            message: `A trip cannot start on an order that is ${order?.status ?? 'missing'}`,
+          });
+        }
+      }
+
+      return tx.trackingSession.create({
         data: {
           orderId: dto.orderId,
           driverId,
@@ -42,13 +65,6 @@ export class TripsService {
           lastLocationAt: null,
         },
       });
-
-      await tx.transportOrder.update({
-        where: { id: dto.orderId },
-        data: { status: STATUS_ORDERS.IN_PROGRESS, pickupAt: now },
-      });
-
-      return session;
     });
 
     this.realtime.emitTripEvent(dto.orderId, 'tracking:trip-started', session);

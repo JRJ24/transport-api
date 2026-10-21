@@ -176,7 +176,12 @@ describe('GET /trips/orders/:orderId (order ownership)', () => {
     ['another customer', 'intruder', 'CUSTOMER', null],
     ['another driver', 'intruder', 'DRIVER', null],
     ['a driver whose assignment was REJECTED', DRIVER_ID, 'DRIVER', 'REJECTED'],
-    ['a driver whose assignment was CANCELLED', DRIVER_ID, 'DRIVER', 'CANCELLED'],
+    [
+      'a driver whose assignment was CANCELLED',
+      DRIVER_ID,
+      'DRIVER',
+      'CANCELLED',
+    ],
   ])(
     '%s gets 403 FORBIDDEN and the trips are never queried',
     async (_who, user, roles, status) => {
@@ -210,9 +215,7 @@ describe('TripsModule wiring', () => {
       imports: [FakeGlobalsModule, TripsModule],
     }).compile();
 
-    expect(moduleRef.get(TripsController)).toBeInstanceOf(
-      TripsController,
-    );
+    expect(moduleRef.get(TripsController)).toBeInstanceOf(TripsController);
     await moduleRef.close();
   });
 });

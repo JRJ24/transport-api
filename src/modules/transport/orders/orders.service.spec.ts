@@ -170,7 +170,12 @@ function setup(options: SetupOptions = {}) {
       findUniqueOrThrow: jest.fn().mockResolvedValue({ balanceUsed: 0 }),
     },
     customerCreditMovement: { create: jest.fn().mockResolvedValue({}) },
-    orderEvent: { create: jest.fn().mockResolvedValue({}) },
+    orderEvent: {
+      create: jest.fn().mockResolvedValue({ id: 'evt-status' }),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    // closeOrderReservations: the schedule dies with the order.
+    reservation: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
     orderCancellation: { create: jest.fn().mockResolvedValue({}) },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
     priceQuote: {
@@ -1707,5 +1712,102 @@ describe('OrdersService.cancel policy (LOG-API-007)', () => {
       }) as unknown,
     });
     expect(tx.refund.create).toHaveBeenCalled();
+  });
+});
+
+describe('OrdersService closing a paid order (LOG-API-008)', () => {
+  const card = (status: PAYMENT_STATUS, amount = 1000) => ({
+    id: `pay-card-${status}`,
+    customerId: 'cust-1',
+    amount,
+    paymentMethod: PAYMENT_METHOD.CARD,
+    status,
+  });
+
+  it('a FAILED trip refunds what was paid, without a fee', async () => {
+    const { service, tx, pricing } = setup({
+      status: STATUS_ORDERS.IN_PROGRESS,
+    });
+    tx.payment.findMany.mockResolvedValue([card(PAYMENT_STATUS.PAID)]);
+
+    await service.updateStatus(operator, 'order-1', {
+      status: STATUS_ORDERS.FAILED,
+    });
+
+    expect(pricing.cancellationFeeFor).not.toHaveBeenCalled();
+    expect(tx.refund.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        amount: 1000,
+        status: PAYMENTS_REFUND_STATUS.PENDING,
+        reason: 'Order TRIP_FAILED: Trip failed',
+      }) as unknown,
+    });
+    expect(tx.orderEvent.update).toHaveBeenCalledWith({
+      where: { id: 'evt-status' },
+      data: {
+        metadata: expect.objectContaining({ refundAmount: 1000 }) as unknown,
+      },
+    });
+    expect(tx.reservation.updateMany).toHaveBeenCalled();
+  });
+
+  it('a live card authorization is queued for release, never kept as a fee', async () => {
+    const { service, tx, pricing } = setup({ status: STATUS_ORDERS.ACCEPTED });
+    pricing.cancellationFeeFor.mockResolvedValue(150);
+    tx.payment.findMany.mockResolvedValue([card(PAYMENT_STATUS.AUTHORIZED)]);
+
+    await service.cancel(customerUser, 'order-1', { reason: 'Ya no' });
+
+    expect(tx.refund.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        paymentId: 'pay-card-AUTHORIZED',
+        amount: 1000,
+        reason: expect.stringContaining(
+          'Release card authorization',
+        ) as unknown,
+      }) as unknown,
+    });
+    expect(tx.orderCancellation.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        feeAmount: 0,
+        refundAmount: 1000,
+      }) as unknown,
+    });
+  });
+
+  it('an order that never collected anything ends with paymentStatus CANCELLED', async () => {
+    const { service, tx } = setup({ status: STATUS_ORDERS.PENDING_PAYMENT });
+    tx.payment.findMany.mockResolvedValue([card(PAYMENT_STATUS.CANCELLED)]);
+
+    await service.cancel(customerUser, 'order-1', { reason: 'Ya no' });
+
+    expect(tx.transportOrder.update).toHaveBeenCalledWith({
+      where: { id: 'order-1' },
+      data: { paymentStatus: PAYMENT_STATUS.CANCELLED },
+    });
+  });
+
+  it('a paid order keeps showing what it holds until the refund is returned', async () => {
+    const { service, tx } = setup({ status: STATUS_ORDERS.REQUESTED });
+    tx.payment.findMany.mockResolvedValue([card(PAYMENT_STATUS.PAID)]);
+
+    await service.cancel(customerUser, 'order-1', { reason: 'Ya no' });
+
+    expect(tx.transportOrder.update).not.toHaveBeenCalled();
+    expect(tx.refund.create).toHaveBeenCalled();
+  });
+
+  it('cancelling the order closes its reservation in the same transaction', async () => {
+    const { service, tx } = setup({ status: STATUS_ORDERS.REQUESTED });
+
+    await service.cancel(operator, 'order-1', { reason: 'Cliente desistio' });
+
+    expect(tx.reservation.updateMany).toHaveBeenCalledWith({
+      where: {
+        orderId: 'order-1',
+        reservationStatus: { in: ['ACTIVE', 'RESCHUDULED'] },
+      },
+      data: { reservationStatus: 'CANCELLED' },
+    });
   });
 });
