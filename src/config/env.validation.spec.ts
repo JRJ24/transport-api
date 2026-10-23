@@ -44,3 +44,37 @@ describe('envSchema PUBLIC_API_BASE_URL', () => {
     },
   );
 });
+
+describe('envSchema JWT_REFRESH_REUSE_GRACE_SECONDS', () => {
+  it('defaults to a 30 second grace window', () => {
+    const result = envSchema.safeParse(base);
+    expect(result.success).toBe(true);
+    expect(result.data?.JWT_REFRESH_REUSE_GRACE_SECONDS).toBe(30);
+  });
+
+  it.each([
+    ['0', 0],
+    ['120', 120],
+  ])('accepts %s (0 disables the grace window)', (value, expected) => {
+    const result = envSchema.safeParse({
+      ...base,
+      JWT_REFRESH_REUSE_GRACE_SECONDS: value,
+    });
+    expect(result.success).toBe(true);
+    expect(result.data?.JWT_REFRESH_REUSE_GRACE_SECONDS).toBe(expected);
+  });
+
+  it.each([['121'], ['-1'], ['abc'], ['1.5']])(
+    'rejects %s at startup',
+    (value) => {
+      const result = envSchema.safeParse({
+        ...base,
+        JWT_REFRESH_REUSE_GRACE_SECONDS: value,
+      });
+      expect(result.success).toBe(false);
+      expect(result.error?.issues[0].path).toEqual([
+        'JWT_REFRESH_REUSE_GRACE_SECONDS',
+      ]);
+    },
+  );
+});

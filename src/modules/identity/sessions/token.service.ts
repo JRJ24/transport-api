@@ -41,15 +41,21 @@ export class TokenService {
     });
   }
 
+  /**
+   * With `issuedAt` (seconds) the token is deterministic: signing again with
+   * the same inputs yields the exact same token.
+   */
   signRefreshToken(input: {
     userId: string;
     sessionId: string;
     ttl: string;
+    issuedAt?: number;
   }): Promise<string> {
-    const payload: Omit<RefreshJwtPayload, 'iat' | 'exp'> = {
+    const payload: Omit<RefreshJwtPayload, 'exp'> = {
       sub: input.userId,
       sessionId: input.sessionId,
       type: TokenType.REFRESH,
+      ...(input.issuedAt !== undefined && { iat: input.issuedAt }),
     };
 
     return this.jwtService.signAsync(payload, {

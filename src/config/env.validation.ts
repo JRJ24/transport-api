@@ -35,6 +35,14 @@ export const envSchema = z
     JWT_ACCESS_TTL: z.string().regex(DURATION_PATTERN).default('15m'),
     JWT_REFRESH_TTL_MOBILE: z.string().regex(DURATION_PATTERN).default('30d'),
     JWT_REFRESH_TTL_WEB: z.string().regex(DURATION_PATTERN).default('7d'),
+    // Seconds the immediately previous refresh token stays usable after a
+    // rotation, so concurrent refreshes are not treated as theft. 0 disables it.
+    JWT_REFRESH_REUSE_GRACE_SECONDS: z.coerce
+      .number()
+      .int()
+      .min(0)
+      .max(120)
+      .default(30),
     BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
 
     THROTTLE_TTL_MS: z.coerce.number().int().positive().default(60_000),
