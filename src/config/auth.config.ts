@@ -11,6 +11,7 @@ export const authConfig = registerAs('auth', () => {
     refreshTtlMobile: e.JWT_REFRESH_TTL_MOBILE,
     refreshTtlWeb: e.JWT_REFRESH_TTL_WEB,
     refreshReuseGraceSeconds: e.JWT_REFRESH_REUSE_GRACE_SECONDS,
+    realtimeSessionCheckSeconds: e.REALTIME_SESSION_CHECK_SEC,
     bcryptSaltRounds: e.BCRYPT_SALT_ROUNDS,
   };
 });

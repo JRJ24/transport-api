@@ -78,3 +78,34 @@ describe('envSchema JWT_REFRESH_REUSE_GRACE_SECONDS', () => {
     },
   );
 });
+
+describe('envSchema REALTIME_SESSION_CHECK_SEC', () => {
+  it('revalidates open sockets every 30 seconds by default', () => {
+    const result = envSchema.safeParse(base);
+    expect(result.success).toBe(true);
+    expect(result.data?.REALTIME_SESSION_CHECK_SEC).toBe(30);
+  });
+
+  it.each([
+    ['5', 5],
+    ['300', 300],
+  ])('accepts %s', (value, expected) => {
+    const result = envSchema.safeParse({
+      ...base,
+      REALTIME_SESSION_CHECK_SEC: value,
+    });
+    expect(result.success).toBe(true);
+    expect(result.data?.REALTIME_SESSION_CHECK_SEC).toBe(expected);
+  });
+
+  it.each([['4'], ['301'], ['abc']])('rejects %s at startup', (value) => {
+    const result = envSchema.safeParse({
+      ...base,
+      REALTIME_SESSION_CHECK_SEC: value,
+    });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0].path).toEqual([
+      'REALTIME_SESSION_CHECK_SEC',
+    ]);
+  });
+});

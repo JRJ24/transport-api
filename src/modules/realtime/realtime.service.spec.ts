@@ -1,7 +1,12 @@
 import type { HttpAdapterHost } from '@nestjs/core';
-import { ASSIGNMENT_STATUS } from '@generated/prisma/enums';
+import {
+  ASSIGNMENT_STATUS,
+  STATUS_ACCOUNT,
+  VERIFICATION_STATUS,
+} from '@generated/prisma/enums';
 import type { JwtService } from '@nestjs/jwt';
 import type { Socket } from 'socket.io';
+import { TokenType } from '@/common/enums/token-type.enum';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import type { appConfig, authConfig, matchingConfig } from '@/config';
 import type { PrismaService } from '@/database/prisma.service';
@@ -120,7 +125,10 @@ describe('RealtimeService.emitOrderStatusChanged', () => {
 
 describe('RealtimeService.handleConnection', () => {
   it('registers every listener before the driver profile lookup resolves', () => {
-    const lookup = deferred<{ id: string } | null>();
+    const lookup = deferred<{
+      id: string;
+      verificationStatus?: VERIFICATION_STATUS;
+    } | null>();
     const prisma = {
       driverProfile: { findFirst: jest.fn().mockReturnValue(lookup.promise) },
     };
@@ -142,7 +150,10 @@ describe('RealtimeService.handleConnection', () => {
   });
 
   it('serves a join sent right after connect and then joins the driver rooms', async () => {
-    const lookup = deferred<{ id: string } | null>();
+    const lookup = deferred<{
+      id: string;
+      verificationStatus?: VERIFICATION_STATUS;
+    } | null>();
     const prisma = {
       driverProfile: { findFirst: jest.fn().mockReturnValue(lookup.promise) },
       orderAssignment: {
@@ -156,7 +167,10 @@ describe('RealtimeService.handleConnection', () => {
     const joining = handlers.get('tracking:join-order')?.({
       orderId: 'order-1',
     });
-    lookup.resolve({ id: 'd1' });
+    lookup.resolve({
+      id: 'd1',
+      verificationStatus: VERIFICATION_STATUS.APPROVED,
+    });
     await joining;
     await flush();
 
@@ -233,7 +247,10 @@ describe('RealtimeService.handleConnection', () => {
   });
 
   it('does not join the driver rooms once the socket is gone', async () => {
-    const lookup = deferred<{ id: string } | null>();
+    const lookup = deferred<{
+      id: string;
+      verificationStatus?: VERIFICATION_STATUS;
+    } | null>();
     const prisma = {
       driverProfile: { findFirst: jest.fn().mockReturnValue(lookup.promise) },
     };
@@ -246,5 +263,237 @@ describe('RealtimeService.handleConnection', () => {
     await flush();
 
     expect(socket.join).not.toHaveBeenCalledWith('driver:d1');
+  });
+});
+
+describe('RealtimeService.authenticateSocket account status (SEC-API-010)', () => {
+  function buildWithSession(status: STATUS_ACCOUNT) {
+    const service = new RealtimeService(
+      {} as HttpAdapterHost,
+      {
+        verifyAsync: jest.fn().mockResolvedValue({
+          sub: 'u1',
+          sessionId: 's1',
+          type: TokenType.ACCESS,
+        }),
+      } as unknown as JwtService,
+      {
+        findValidWithUser: jest.fn().mockResolvedValue({
+          id: 's1',
+          userId: 'u1',
+          user: {
+            id: 'u1',
+            email: 'u1@x.com',
+            fullName: 'U1',
+            status,
+            userRoles: [],
+          },
+        }),
+      } as unknown as SessionsService,
+      {} as PrismaService,
+      {} as PresenceService,
+      { corsOrigins: [] } as unknown as ReturnType<typeof appConfig>,
+      { accessSecret: 'a'.repeat(32) } as ReturnType<typeof authConfig>,
+      { autoOffer: 'off' } as ReturnType<typeof matchingConfig>,
+    );
+    const internals = service as unknown as {
+      authenticateSocket(socket: unknown): Promise<AuthenticatedUser>;
+    };
+    return () =>
+      internals.authenticateSocket({
+        handshake: { auth: { token: 't' }, headers: {} },
+      });
+  }
+
+  it.each([
+    [STATUS_ACCOUNT.BLOCKED, 'Account is blocked'],
+    [STATUS_ACCOUNT.INACTIVE, 'Account is not active'],
+  ])('refuses the handshake of a %s account', async (status, message) => {
+    await expect(buildWithSession(status)()).rejects.toThrow(message);
+  });
+
+  it('lets an active account connect', async () => {
+    await expect(
+      buildWithSession(STATUS_ACCOUNT.ACTIVE)(),
+    ).resolves.toMatchObject({ id: 'u1', sessionId: 's1' });
+  });
+});
+
+describe('RealtimeService session revalidation (SEC-API-010)', () => {
+  function sessionSocket(sessionId: string) {
+    return {
+      data: { user: { id: `user-${sessionId}`, sessionId } },
+      emit: jest.fn(),
+      disconnect: jest.fn(),
+    };
+  }
+
+  function buildWithSockets(
+    sessionIds: string[],
+    findMany: jest.Mock,
+    checkSeconds = 30,
+  ) {
+    const service = new RealtimeService(
+      {} as HttpAdapterHost,
+      {} as JwtService,
+      {} as SessionsService,
+      { userSession: { findMany } } as unknown as PrismaService,
+      {} as PresenceService,
+      { corsOrigins: [] } as unknown as ReturnType<typeof appConfig>,
+      { realtimeSessionCheckSeconds: checkSeconds } as ReturnType<
+        typeof authConfig
+      >,
+      { autoOffer: 'off' } as ReturnType<typeof matchingConfig>,
+    );
+    const sockets = new Map(
+      sessionIds.map((id, index) => [`sock-${index}`, sessionSocket(id)]),
+    );
+    const io = { of: jest.fn(() => ({ sockets })), close: jest.fn() };
+    (service as unknown as { io: unknown }).io = io;
+    return { service, sockets, io };
+  }
+
+  it('disconnects, after warning them, only the sockets whose session is no longer valid', async () => {
+    const findMany = jest.fn().mockResolvedValue([{ id: 's1' }, { id: 's2' }]);
+    const { service, sockets } = buildWithSockets(['s1', 's2', 's3'], findMany);
+
+    await service.revalidateConnectedSessions();
+
+    expect(findMany).toHaveBeenCalledWith({
+      where: {
+        id: { in: ['s1', 's2', 's3'] },
+        revokedAt: null,
+        expiresAt: { gt: expect.any(Date) as unknown },
+        user: { status: STATUS_ACCOUNT.ACTIVE },
+      },
+      select: { id: true },
+    });
+    const [kept1, kept2, dropped] = [...sockets.values()];
+    expect(kept1.disconnect).not.toHaveBeenCalled();
+    expect(kept2.disconnect).not.toHaveBeenCalled();
+    expect(dropped.emit).toHaveBeenCalledWith('auth:session-ended', {
+      reason: 'SESSION_ENDED',
+    });
+    expect(dropped.disconnect).toHaveBeenCalledWith(true);
+    expect(dropped.emit.mock.invocationCallOrder[0]).toBeLessThan(
+      dropped.disconnect.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('disconnects nobody when the check itself fails', async () => {
+    const findMany = jest.fn().mockRejectedValue(new Error('db down'));
+    const { service, sockets } = buildWithSockets(['s1', 's2'], findMany);
+
+    await expect(
+      service.revalidateConnectedSessions(),
+    ).resolves.toBeUndefined();
+
+    for (const socket of sockets.values()) {
+      expect(socket.disconnect).not.toHaveBeenCalled();
+    }
+  });
+
+  it('queries in batches of at most 500 sessions', async () => {
+    const ids = Array.from({ length: 1001 }, (_, i) => `s${i}`);
+    const findMany = jest.fn(({ where }: { where: { id: { in: string[] } } }) =>
+      Promise.resolve(where.id.in.map((id) => ({ id }))),
+    );
+    const { service } = buildWithSockets(ids, findMany);
+
+    await service.revalidateConnectedSessions();
+
+    expect(findMany).toHaveBeenCalledTimes(3);
+    for (const [args] of findMany.mock.calls) {
+      expect(args.where.id.in.length).toBeLessThanOrEqual(500);
+    }
+  });
+
+  it('does nothing without a socket server', async () => {
+    const findMany = jest.fn();
+    const { service } = buildWithSockets(['s1'], findMany);
+    (service as unknown as { io: unknown }).io = undefined;
+
+    await expect(
+      service.revalidateConnectedSessions(),
+    ).resolves.toBeUndefined();
+    expect(findMany).not.toHaveBeenCalled();
+  });
+
+  it('skips a round while the previous one is still running', async () => {
+    const pending = deferred<{ id: string }[]>();
+    const findMany = jest.fn().mockReturnValue(pending.promise);
+    const { service } = buildWithSockets(['s1'], findMany);
+
+    const first = service.revalidateConnectedSessions();
+    await service.revalidateConnectedSessions();
+    pending.resolve([{ id: 's1' }]);
+    await first;
+
+    expect(findMany).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs on the configured interval and stops on shutdown', async () => {
+    jest.useFakeTimers();
+    try {
+      const { service } = buildWithSockets(['s1'], jest.fn(), 30);
+      const revalidate = jest
+        .spyOn(service, 'revalidateConnectedSessions')
+        .mockResolvedValue(undefined);
+
+      (
+        service as unknown as { startSessionRevalidation(): void }
+      ).startSessionRevalidation();
+      jest.advanceTimersByTime(30_000);
+      expect(revalidate).toHaveBeenCalledTimes(1);
+
+      await service.onModuleDestroy();
+      jest.advanceTimersByTime(60_000);
+      expect(revalidate).toHaveBeenCalledTimes(1);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('RealtimeService driver rooms by approval (SEC-API-010)', () => {
+  it.each([VERIFICATION_STATUS.PENDING, VERIFICATION_STATUS.REJECTED])(
+    'keeps a %s driver out of the request pool but in its own room',
+    async (verificationStatus) => {
+      const prisma = {
+        driverProfile: {
+          findFirst: jest
+            .fn()
+            .mockResolvedValue({ id: 'd1', verificationStatus }),
+        },
+      };
+      const { service } = build(prisma);
+      const { socket } = fakeSocket(driverUser);
+
+      connect(service, socket);
+      await flush();
+
+      expect(socket.join).toHaveBeenCalledWith('user:user-d1');
+      expect(socket.join).toHaveBeenCalledWith('driver:d1');
+      expect(socket.join).not.toHaveBeenCalledWith('drivers:requests');
+    },
+  );
+
+  it('puts an approved driver in the request pool', async () => {
+    const prisma = {
+      driverProfile: {
+        findFirst: jest.fn().mockResolvedValue({
+          id: 'd1',
+          verificationStatus: VERIFICATION_STATUS.APPROVED,
+        }),
+      },
+    };
+    const { service } = build(prisma);
+    const { socket } = fakeSocket(driverUser);
+
+    connect(service, socket);
+    await flush();
+
+    expect(socket.join).toHaveBeenCalledWith('driver:d1');
+    expect(socket.join).toHaveBeenCalledWith('drivers:requests');
   });
 });

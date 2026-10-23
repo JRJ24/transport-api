@@ -43,6 +43,14 @@ export const envSchema = z
       .min(0)
       .max(120)
       .default(30),
+    // How often open Socket.io connections are revalidated (session + account
+    // status). A revoked session or blocked account loses its socket within it.
+    REALTIME_SESSION_CHECK_SEC: z.coerce
+      .number()
+      .int()
+      .min(5)
+      .max(300)
+      .default(30),
     BCRYPT_SALT_ROUNDS: z.coerce.number().int().min(10).max(15).default(12),
 
     THROTTLE_TTL_MS: z.coerce.number().int().positive().default(60_000),
