@@ -340,9 +340,10 @@ describe('RealtimeService session revalidation (SEC-API-010)', () => {
       { userSession: { findMany } } as unknown as PrismaService,
       {} as PresenceService,
       { corsOrigins: [] } as unknown as ReturnType<typeof appConfig>,
-      { realtimeSessionCheckSeconds: checkSeconds } as ReturnType<
-        typeof authConfig
-      >,
+      {
+        realtimeSessionCheckSeconds: checkSeconds,
+        sessionMaxAge: '90d',
+      } as ReturnType<typeof authConfig>,
       { autoOffer: 'off' } as ReturnType<typeof matchingConfig>,
     );
     const sockets = new Map(
@@ -364,6 +365,7 @@ describe('RealtimeService session revalidation (SEC-API-010)', () => {
         id: { in: ['s1', 's2', 's3'] },
         revokedAt: null,
         expiresAt: { gt: expect.any(Date) as unknown },
+        createdAt: { gt: expect.any(Date) as unknown },
         user: { status: STATUS_ACCOUNT.ACTIVE },
       },
       select: { id: true },

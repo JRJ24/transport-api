@@ -12,7 +12,7 @@ import type { UserSession } from '@generated/prisma/client';
 import { ROLES, STATUS_ACCOUNT } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
-import { addDuration } from '@/common/utils/date.util';
+import { addDuration, durationToMs } from '@/common/utils/date.util';
 import { sha256 } from '@/common/utils/hash.util';
 import { authConfig } from '@/config';
 import {
@@ -60,9 +60,23 @@ export class SessionsService {
       : this.auth.refreshTtlMobile;
   }
 
+  /** Sessions created before this are past the absolute lifetime cap. */
+  private sessionCutoff(): Date {
+    return new Date(Date.now() - durationToMs(this.auth.sessionMaxAge));
+  }
+
+  /** Sliding expiry, never beyond `createdAt` + the absolute cap. */
+  private nextExpiry(createdAt: Date, ttl: string): Date {
+    const sliding = addDuration(new Date(), ttl);
+    const cap = new Date(
+      createdAt.getTime() + durationToMs(this.auth.sessionMaxAge),
+    );
+    return sliding < cap ? sliding : cap;
+  }
+
   async createSession(input: CreateSessionInput): Promise<IssuedSession> {
     const ttl = this.refreshTtlFor(input.platform);
-    const expiresAt = addDuration(new Date(), ttl);
+    const expiresAt = this.nextExpiry(new Date(), ttl);
     const sessionId = randomUUID();
 
     const refreshToken = await this.tokenService.signRefreshToken({
@@ -96,7 +110,10 @@ export class SessionsService {
   async rotateSession(refreshToken: string): Promise<RotatedSession> {
     const payload = await this.tokenService.verifyRefreshToken(refreshToken);
 
-    const session = await this.repository.findValidWithUser(payload.sessionId);
+    const session = await this.repository.findValidWithUser(
+      payload.sessionId,
+      this.sessionCutoff(),
+    );
 
     if (!session || session.userId !== payload.sub) {
       throw new UnauthorizedException({
@@ -134,7 +151,7 @@ export class SessionsService {
       sessionId: session.id,
       currentHash: presentedHash,
       nextHash: sha256(nextRefreshToken),
-      expiresAt: addDuration(new Date(), ttl),
+      expiresAt: this.nextExpiry(session.createdAt, ttl),
       rotatedAt: new Date(issuedAt * 1000),
     });
 
@@ -212,7 +229,7 @@ export class SessionsService {
   }
 
   findValidWithUser(sessionId: string): Promise<SessionWithUser | null> {
-    return this.repository.findValidWithUser(sessionId);
+    return this.repository.findValidWithUser(sessionId, this.sessionCutoff());
   }
 
   /**
@@ -272,6 +289,6 @@ export class SessionsService {
   }
 
   listSessions(userId: string): Promise<UserSession[]> {
-    return this.repository.listActiveForUser(userId);
+    return this.repository.listActiveForUser(userId, this.sessionCutoff());
   }
 }

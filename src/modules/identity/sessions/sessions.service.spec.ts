@@ -53,9 +53,17 @@ class InMemorySessions {
     return Promise.resolve(row ? { ...row } : null);
   }
 
-  findValidWithUser(id: string): Promise<SessionWithUser | null> {
+  findValidWithUser(
+    id: string,
+    createdAfter?: Date,
+  ): Promise<SessionWithUser | null> {
     const row = this.rows.get(id);
-    if (!row || row.revokedAt || row.expiresAt <= new Date()) {
+    if (
+      !row ||
+      row.revokedAt ||
+      row.expiresAt <= new Date() ||
+      (createdAfter && row.createdAt <= createdAfter)
+    ) {
       return Promise.resolve(null);
     }
     return Promise.resolve({
@@ -89,7 +97,7 @@ class InMemorySessions {
   }
 }
 
-const authFor = (refreshReuseGraceSeconds: number) =>
+const authFor = (refreshReuseGraceSeconds: number, sessionMaxAge = '90d') =>
   ({
     accessSecret: 'a'.repeat(32),
     refreshSecret: 'b'.repeat(32),
@@ -98,11 +106,12 @@ const authFor = (refreshReuseGraceSeconds: number) =>
     refreshTtlWeb: '7d',
     bcryptSaltRounds: 10,
     refreshReuseGraceSeconds,
+    sessionMaxAge,
   }) as ConfigType<typeof authConfig>;
 
-function setup(graceSeconds = 30) {
+function setup(graceSeconds = 30, sessionMaxAge = '90d') {
   const repository = new InMemorySessions();
-  const auth = authFor(graceSeconds);
+  const auth = authFor(graceSeconds, sessionMaxAge);
   const service = new SessionsService(
     repository as unknown as SessionsRepository,
     new TokenService(new JwtService(), auth),
@@ -334,6 +343,72 @@ describe('SessionsService.rotateSession, reuse grace window (FIA-API-005)', () =
         ERROR_CODES.ACCOUNT_BLOCKED,
       );
       expect(repository.rows.get(sessionId)?.revokedAt).not.toBeNull();
+    });
+  });
+
+  describe('SEC-API-018: sessions have an absolute maximum lifetime', () => {
+    const DAY = 24 * 60 * 60 * 1000;
+
+    it('never creates a session that expires after the cap', async () => {
+      const { service } = setup(30, '1d');
+
+      const { expiresAt } = await service.createSession({
+        userId: 'user-1',
+        platform: 'web',
+      });
+
+      expect(expiresAt.getTime()).toBe(Date.now() + DAY);
+    });
+
+    it('does not let a refresh push the expiry past the cap', async () => {
+      const { repository, service } = setup(30, '10d');
+      const { sessionId, refreshToken } = await service.createSession({
+        userId: 'user-1',
+        platform: 'web',
+      });
+      const createdAt = repository.rows.get(sessionId)!.createdAt.getTime();
+
+      jest.advanceTimersByTime(5 * DAY);
+      const second = await service.rotateSession(refreshToken);
+      jest.advanceTimersByTime(4 * DAY);
+      await service.rotateSession(second.refreshToken);
+
+      expect(repository.rows.get(sessionId)!.expiresAt.getTime()).toBe(
+        createdAt + 10 * DAY,
+      );
+    });
+
+    it('refuses to refresh a session older than the cap, even with a future expiry', async () => {
+      const { repository, service } = setup(30, '10d');
+      const { sessionId, refreshToken } = await service.createSession({
+        userId: 'user-1',
+        platform: 'mobile', // TTL de 30d: el JWT sigue vigente, solo cuenta el tope
+      });
+      // Sesión anterior al despliegue: su expiresAt ya se extendió más allá.
+      jest.advanceTimersByTime(11 * DAY);
+      repository.rows.get(sessionId)!.expiresAt = new Date(Date.now() + DAY);
+
+      expect(await rejectionCode(service.rotateSession(refreshToken))).toBe(
+        ERROR_CODES.INVALID_REFRESH_TOKEN,
+      );
+    });
+
+    it('does not stretch the cap through the reuse grace window', async () => {
+      const { repository, service } = setup(30, '10d');
+      const { sessionId, refreshToken: t1 } = await service.createSession({
+        userId: 'user-1',
+        platform: 'mobile',
+      });
+      const createdAt = repository.rows.get(sessionId)!.createdAt.getTime();
+      jest.advanceTimersByTime(9 * DAY);
+      const { refreshToken: t2 } = await service.rotateSession(t1);
+
+      const replay = await service.rotateSession(t1);
+
+      expect(replay.refreshToken).toBe(t2);
+      expect(repository.rows.get(sessionId)!.expiresAt.getTime()).toBe(
+        createdAt + 10 * DAY,
+      );
     });
   });
 });

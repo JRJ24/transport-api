@@ -17,6 +17,7 @@ import {
   VERIFICATION_STATUS,
 } from '@generated/prisma/enums';
 import { Server, type Socket } from 'socket.io';
+import { durationToMs } from '@/common/utils/date.util';
 import { TokenType } from '@/common/enums/token-type.enum';
 import { permissionsForRoles } from '@/common/enums/permission.enum';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
@@ -152,6 +153,9 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
             id: { in: sessionIds.slice(i, i + REVALIDATION_BATCH_SIZE) },
             revokedAt: null,
             expiresAt: { gt: new Date() },
+            createdAt: {
+              gt: new Date(Date.now() - durationToMs(this.auth.sessionMaxAge)),
+            },
             user: { status: STATUS_ACCOUNT.ACTIVE },
           },
           select: { id: true },
