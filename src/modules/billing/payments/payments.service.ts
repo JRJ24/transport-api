@@ -535,88 +535,9 @@ export class PaymentsService {
     user: AuthenticatedUser,
     ip: string,
   ): Promise<CreateCardnetSessionResult> {
-    const order = await this.prisma.transportOrder.findFirst({
-      where: {
-        id: orderId,
-        customer: { userId: user.id },
-      },
-      include: {
-        customer: {
-          include: {
-            user: { select: SAFE_USER_SELECT },
-            customerAddresses: true,
-          },
-        },
-        orderStops: true,
-        payments: { orderBy: { createdAt: 'desc' } },
-      },
-    });
-
-    if (!order) {
-      throw new NotFoundException({
-        code: ERROR_CODES.RESOURCE_NOT_FOUND,
-        message: 'Order not found',
-      });
-    }
-
-    // Before the reuse below too: a session opened while the order was still
-    // payable must not be handed out again once it is cancelled.
-    this.assertOrderAcceptsPayment(order, user);
-
-    if (
-      order.paymentStatus === PAYMENT_STATUS.PAID ||
-      order.paymentStatus === PAYMENT_STATUS.AUTHORIZED ||
-      order.payments.some((payment) =>
-        this.isDispatchAuthorizedPayment(payment),
-      )
-    ) {
-      throw new ConflictException({
-        code: ERROR_CODES.RESOURCE_CONFLICT,
-        message: 'Order already has a dispatchable payment',
-      });
-    }
-
-    const amount = this.payableAmount(order);
-
-    const reusable = order.payments.find(
-      (payment) =>
-        payment.paymentProvider === 'cardnet' &&
-        payment.providerSessionId &&
-        payment.providerSessionKey &&
-        payment.expiresAt &&
-        payment.expiresAt.getTime() > Date.now() &&
-        (
-          [
-            PAYMENT_STATUS.PENDING,
-            PAYMENT_STATUS.PROCESSING,
-          ] as PAYMENT_STATUS[]
-        ).includes(payment.status),
-    );
-
-    if (reusable?.providerSessionId && reusable.expiresAt) {
-      return {
-        paymentId: reusable.id,
-        orderId: order.id,
-        session: reusable.providerSessionId,
-        authorizeUrl: this.requireCardnetAuthorizeUrl(),
-        expiresAt: reusable.expiresAt,
-      };
-    }
-
-    const transactionId = await this.generateTransactionId();
-    const payment = await this.prisma.payment.create({
-      data: {
-        orderId: order.id,
-        customerId: order.customerId,
-        amount,
-        currency: 'DOP',
-        paymentMethod: PAYMENT_METHOD.CARD,
-        paymentProvider: 'cardnet',
-        status: PAYMENT_STATUS.PENDING,
-        providerReference: null,
-        transactionId,
-      },
-    });
+    const slot = await this.claimCardnetSessionSlot(orderId, user);
+    if ('reuse' in slot) return slot.reuse;
+    const { order, payment, amount, transactionId } = slot;
     const payload = this.buildCardnetPayload(order, transactionId, ip, amount);
 
     try {
@@ -664,6 +585,136 @@ export class PaymentsService {
 
       throw error;
     }
+  }
+
+  /** Reserve a payment locally; the CardNET HTTP call runs after commit. */
+  private async claimCardnetSessionSlot(
+    orderId: string,
+    user: AuthenticatedUser,
+  ): Promise<
+    | { reuse: CreateCardnetSessionResult }
+    | {
+        order: CardnetOrder;
+        payment: Payment;
+        amount: number;
+        transactionId: string;
+      }
+  > {
+    return this.prisma.$transaction(async (tx) => {
+      await this.lockOrderForPayment(tx, orderId);
+      const order = await tx.transportOrder.findFirst({
+        where: {
+          id: orderId,
+          customer: { userId: user.id },
+        },
+        include: {
+          customer: {
+            include: {
+              user: { select: SAFE_USER_SELECT },
+              customerAddresses: true,
+            },
+          },
+          orderStops: true,
+          payments: { orderBy: { createdAt: 'desc' } },
+        },
+      });
+
+      if (!order) {
+        throw new NotFoundException({
+          code: ERROR_CODES.RESOURCE_NOT_FOUND,
+          message: 'Order not found',
+        });
+      }
+
+      // Before the reuse below too: a session opened while the order was still
+      // payable must not be handed out again once it is cancelled.
+      this.assertOrderAcceptsPayment(order, user);
+
+      if (
+        order.paymentStatus === PAYMENT_STATUS.PAID ||
+        order.paymentStatus === PAYMENT_STATUS.AUTHORIZED ||
+        order.payments.some((payment) =>
+          this.isDispatchAuthorizedPayment(payment),
+        )
+      ) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message: 'Order already has a dispatchable payment',
+        });
+      }
+
+      const amount = this.payableAmount(order);
+
+      const reusable = order.payments.find(
+        (payment) =>
+          payment.paymentProvider === 'cardnet' &&
+          payment.providerSessionId &&
+          payment.providerSessionKey &&
+          payment.expiresAt &&
+          payment.expiresAt.getTime() > Date.now() &&
+          (
+            [
+              PAYMENT_STATUS.PENDING,
+              PAYMENT_STATUS.PROCESSING,
+            ] as PAYMENT_STATUS[]
+          ).includes(payment.status),
+      );
+
+      if (reusable?.providerSessionId && reusable.expiresAt) {
+        return {
+          reuse: {
+            paymentId: reusable.id,
+            orderId: order.id,
+            session: reusable.providerSessionId,
+            authorizeUrl: this.requireCardnetAuthorizeUrl(),
+            expiresAt: reusable.expiresAt,
+          },
+        };
+      }
+
+      const pending = order.payments.filter(
+        (payment) =>
+          payment.paymentProvider === 'cardnet' &&
+          payment.status === PAYMENT_STATUS.PENDING &&
+          !payment.providerSessionId,
+      );
+      const abandonedBefore = Date.now() - 2 * 60_000;
+      if (
+        pending.some((payment) => payment.createdAt.getTime() > abandonedBefore)
+      ) {
+        throw new ConflictException({
+          code: ERROR_CODES.RESOURCE_CONFLICT,
+          message:
+            'A payment session is already being created for this order; retry in a moment',
+        });
+      }
+      if (pending.length) {
+        await tx.payment.updateMany({
+          where: {
+            id: { in: pending.map((payment) => payment.id) },
+            status: PAYMENT_STATUS.PENDING,
+            providerSessionId: null,
+          },
+          data: { status: PAYMENT_STATUS.FAILED },
+        });
+      }
+
+      const transactionId = await this.generateTransactionId();
+      const payment = await tx.payment.create({
+        data: {
+          orderId: order.id,
+          customerId: order.customerId,
+          amount,
+          currency: 'DOP',
+          paymentMethod: PAYMENT_METHOD.CARD,
+          paymentProvider: 'cardnet',
+          status: PAYMENT_STATUS.PENDING,
+          providerReference: null,
+          transactionId,
+        },
+      });
+      return { order, payment, amount, transactionId };
+    });
   }
 
   async verifyCardnetPayment(
@@ -767,6 +818,7 @@ export class PaymentsService {
 
     const [updated, refundReason] = await this.prisma.$transaction(
       async (tx) => {
+        await this.lockOrderForPayment(tx, payment.orderId);
         // Conditional write: the return URL, the webhook and the cancel
         // redirect can race on one session. Whoever settles it first wins and
         // the others leave it alone instead of overwriting PAID/REFUNDED.

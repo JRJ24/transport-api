@@ -58,6 +58,7 @@ function setup(
   // only writes while it is not settled, like `status: { notIn: [...] }`.
   const row: Record<string, unknown> = { ...pendingCardnet };
   const tx = {
+    $queryRaw: jest.fn().mockResolvedValue([]),
     payment: {
       updateMany: jest.fn(
         ({
@@ -80,6 +81,10 @@ function setup(
     // rejectedCaptureReason asks for the other payments; syncOrderAfterPayment
     // for all of them, including the capture just marked PAID.
     transportOrder: {
+      findFirst: jest.fn().mockResolvedValue({
+        ...order,
+        payments: [pendingCardnet],
+      }),
       findUnique: jest.fn(
         ({ select }: { select: { payments: { where?: unknown } } }) =>
           Promise.resolve({
