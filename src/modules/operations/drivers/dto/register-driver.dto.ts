@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
+  IsByteLength,
   IsDate,
   IsEmail,
   IsInt,
@@ -10,10 +11,10 @@ import {
   Length,
   Matches,
   Max,
-  MaxLength,
   Min,
   MinLength,
 } from 'class-validator';
+import { PASSWORD_MAX_BYTES } from '@/common/constants/password.constant';
 
 export class RegisterDriverDto {
   @ApiProperty({ example: 'Juan Perez' })
@@ -35,10 +36,12 @@ export class RegisterDriverDto {
   })
   phone!: string;
 
-  @ApiProperty({ minLength: 8, maxLength: 72 })
+  @ApiProperty({ minLength: 8, maxLength: PASSWORD_MAX_BYTES })
   @IsString()
   @MinLength(8)
-  @MaxLength(72)
+  @IsByteLength(0, PASSWORD_MAX_BYTES, {
+    message: `$property must not exceed ${PASSWORD_MAX_BYTES} bytes`,
+  })
   @Matches(/^(?=.*[A-Za-z])(?=.*\d).+$/, {
     message: 'password must contain at least one letter and one number',
   })

@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsByteLength,
   IsEmail,
   IsEnum,
   IsOptional,
@@ -11,6 +12,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { DOCUMENT_TYPE, TYPE_CUSTOMER } from '@generated/prisma/enums';
+import { PASSWORD_MAX_BYTES } from '@/common/constants/password.constant';
 
 export class CreateTmsCustomerDto {
   @ApiProperty({ example: 'Juan Perez' })
@@ -78,7 +80,9 @@ export class CreateTmsCustomerDto {
   @IsOptional()
   @IsString()
   @MinLength(8)
-  @MaxLength(128)
+  @IsByteLength(0, PASSWORD_MAX_BYTES, {
+    message: `$property must not exceed ${PASSWORD_MAX_BYTES} bytes`,
+  })
   @Matches(/^(?=.*[A-Za-z])(?=.*\d).+$/, {
     message: 'password must contain letters and numbers',
   })

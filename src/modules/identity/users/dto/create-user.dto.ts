@@ -2,6 +2,7 @@ import { ApiProperty } from '@nestjs/swagger';
 import {
   ArrayMinSize,
   IsArray,
+  IsByteLength,
   IsEmail,
   IsEnum,
   IsString,
@@ -9,6 +10,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { ROLES } from '@generated/prisma/enums';
+import { PASSWORD_MAX_BYTES } from '@/common/constants/password.constant';
 
 export class CreateUserDto {
   @ApiProperty()
@@ -28,6 +30,9 @@ export class CreateUserDto {
   @ApiProperty()
   @IsString()
   @MinLength(8)
+  @IsByteLength(0, PASSWORD_MAX_BYTES, {
+    message: `$property must not exceed ${PASSWORD_MAX_BYTES} bytes`,
+  })
   password!: string;
 
   @ApiProperty({ enum: ROLES, isArray: true })
