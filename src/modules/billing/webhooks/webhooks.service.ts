@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, timingSafeEqual } from 'node:crypto';
 import {
   Inject,
   Injectable,
@@ -75,16 +75,17 @@ export class WebhooksService {
         throw new UnauthorizedException('Invalid webhook signature');
       }
 
-      await this.recordEvent(provider, payload, signatureVerified);
+      await this.recordEvent(provider, payload, signatureVerified, rawBody);
       return { received: true, processed: false };
     }
 
-    return this.receiveCardnet(payload, signatureVerified);
+    return this.receiveCardnet(payload, signatureVerified, rawBody);
   }
 
   private async receiveCardnet(
     payload: Record<string, unknown>,
     signatureVerified: boolean,
+    rawBody: Buffer | undefined,
   ): Promise<WebhookAck> {
     const session =
       optionalString(payload.SESSION) ??
@@ -106,7 +107,12 @@ export class WebhooksService {
       return { received: true, processed: false };
     }
 
-    const event = await this.recordEvent('cardnet', payload, signatureVerified);
+    const event = await this.recordEvent(
+      'cardnet',
+      payload,
+      signatureVerified,
+      rawBody,
+    );
 
     try {
       const receipt =
@@ -133,6 +139,7 @@ export class WebhooksService {
     provider: WebhookProvider,
     payload: Record<string, unknown>,
     signatureVerified: boolean,
+    rawBody: Buffer | undefined,
   ): Promise<WebhookEvent | null> {
     const externalEventId =
       optionalString(payload.externalEventId) ??
@@ -141,7 +148,11 @@ export class WebhooksService {
       optionalString(payload.TransactionId) ??
       optionalString(payload.reference) ??
       optionalString(payload.id) ??
-      `${provider}_${Date.now()}`;
+      // No id in the payload: a fingerprint of the body, so a retried delivery
+      // maps to the same event (a timestamp made every retry a new one).
+      `body-${createHash('sha256')
+        .update(rawBody ?? JSON.stringify(payload))
+        .digest('hex')}`;
     const eventType =
       optionalString(payload.eventType) ??
       optionalString(payload.type) ??
@@ -150,28 +161,29 @@ export class WebhooksService {
       `${provider}.payment.updated`;
     const scopedExternalId = `${provider}:${externalEventId}`;
 
-    const existing = await this.prisma.webhookEvent.findFirst({
-      where: { externalEventId: scopedExternalId },
-    });
-
-    if (existing) {
-      return null;
+    try {
+      // Unique external_event_id: a concurrent retry loses the race with P2002
+      // instead of storing a second copy.
+      return await this.prisma.webhookEvent.create({
+        data: {
+          eventType,
+          externalEventId: scopedExternalId,
+          payload: {
+            provider,
+            signatureVerified,
+            payload,
+          } as Prisma.InputJsonObject,
+          processed: false,
+          processedAt: new Date(),
+          createdAt: new Date(),
+        },
+      });
+    } catch (error) {
+      if (isUniqueViolation(error)) {
+        return null;
+      }
+      throw error;
     }
-
-    return this.prisma.webhookEvent.create({
-      data: {
-        eventType,
-        externalEventId: scopedExternalId,
-        payload: {
-          provider,
-          signatureVerified,
-          payload,
-        } as Prisma.InputJsonObject,
-        processed: false,
-        processedAt: new Date(),
-        createdAt: new Date(),
-      },
-    });
   }
 
   /**
@@ -214,4 +226,12 @@ export class WebhooksService {
 
     return true;
   }
+}
+
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { code?: unknown }).code === 'P2002'
+  );
 }

@@ -1298,6 +1298,7 @@ model WebhookEvent {
   processedAt     DateTime @map("processed_at")
   createdAt       DateTime @map("created_at")
 
+  @@unique([externalEventId])
   @@map("webhook_events")
   @@schema("INTEGRATIONS")
 }
