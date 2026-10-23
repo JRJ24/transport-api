@@ -1,6 +1,7 @@
 import type { ConfigType } from '@nestjs/config';
 import { JwtService } from '@nestjs/jwt';
 import type { UserSession } from '@generated/prisma/client';
+import { STATUS_ACCOUNT } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { authConfig } from '@/config';
 import type {
@@ -16,6 +17,7 @@ import { TokenService } from './token.service';
  */
 class InMemorySessions {
   readonly rows = new Map<string, UserSession>();
+  accountStatus: STATUS_ACCOUNT = STATUS_ACCOUNT.ACTIVE;
 
   create(data: {
     id: string;
@@ -58,7 +60,7 @@ class InMemorySessions {
     }
     return Promise.resolve({
       ...row,
-      user: { userRoles: [] },
+      user: { status: this.accountStatus, userRoles: [] },
     } as unknown as SessionWithUser);
   }
 
@@ -280,6 +282,58 @@ describe('SessionsService.rotateSession, reuse grace window (FIA-API-005)', () =
         ERROR_CODES.TOKEN_REUSE_DETECTED,
       );
       expect(t2).toBeDefined();
+    });
+  });
+
+  describe('SEC-API-019: refresh rejects accounts that are not active', () => {
+    it.each([STATUS_ACCOUNT.BLOCKED, STATUS_ACCOUNT.INACTIVE])(
+      'answers 403 and revokes the session for good when the account is %s',
+      async (status) => {
+        const { repository, service } = setup();
+        const { sessionId, refreshToken } = await service.createSession({
+          userId: 'user-1',
+          platform: 'web',
+        });
+        repository.accountStatus = status;
+
+        await expect(service.rotateSession(refreshToken)).rejects.toMatchObject(
+          { status: 403 },
+        );
+        expect(repository.rows.get(sessionId)?.revokedAt).not.toBeNull();
+
+        // Reactivar la cuenta no revive la sesión.
+        repository.accountStatus = STATUS_ACCOUNT.ACTIVE;
+        expect(await rejectionCode(service.rotateSession(refreshToken))).toBe(
+          ERROR_CODES.INVALID_REFRESH_TOKEN,
+        );
+      },
+    );
+
+    it.each([
+      [STATUS_ACCOUNT.BLOCKED, ERROR_CODES.ACCOUNT_BLOCKED],
+      [STATUS_ACCOUNT.INACTIVE, ERROR_CODES.ACCOUNT_INACTIVE],
+    ])('uses the login error code for a %s account', async (status, code) => {
+      const { repository, service } = setup();
+      const { refreshToken } = await service.createSession({
+        userId: 'user-1',
+        platform: 'web',
+      });
+      repository.accountStatus = status;
+
+      expect(await rejectionCode(service.rotateSession(refreshToken))).toBe(
+        code,
+      );
+    });
+
+    it('does not hand out tokens through the grace window to a blocked account', async () => {
+      const { repository, service } = setup();
+      const { sessionId, t1 } = await loginAndRotate(service);
+      repository.accountStatus = STATUS_ACCOUNT.BLOCKED;
+
+      expect(await rejectionCode(service.rotateSession(t1))).toBe(
+        ERROR_CODES.ACCOUNT_BLOCKED,
+      );
+      expect(repository.rows.get(sessionId)?.revokedAt).not.toBeNull();
     });
   });
 });

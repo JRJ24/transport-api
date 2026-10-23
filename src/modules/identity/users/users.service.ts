@@ -1,10 +1,10 @@
 import { Inject, Injectable, NotFoundException } from '@nestjs/common';
 import type { ConfigType } from '@nestjs/config';
-import type {
-  DOCUMENT_TYPE,
-  ROLES,
+import {
   STATUS_ACCOUNT,
-  TYPE_CUSTOMER,
+  type DOCUMENT_TYPE,
+  type ROLES,
+  type TYPE_CUSTOMER,
 } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { hashPassword } from '@/common/utils/hash.util';
@@ -15,6 +15,7 @@ import {
 import type { PaginatedResult } from '@/common/interfaces/pagination.interface';
 import { authConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
+import { revokeUserSessions } from '../sessions/session-revocation';
 import type { UserQueryDto } from './dto/user-query.dto';
 import {
   toUserResponse,
@@ -190,11 +191,28 @@ export class UsersService {
     return toPaginatedResult(users.map(toUserResponse), totalItems, params);
   }
 
+  /**
+   * Leaving ACTIVE revokes every session in the same transaction, so a
+   * blocked account cannot keep refreshing nor come back with old sessions.
+   */
   async setStatus(id: string, status: STATUS_ACCOUNT): Promise<UserWithRoles> {
-    return this.prisma.user.update({
-      where: { id },
-      data: { status },
-      include: USER_WITH_ROLES_INCLUDE,
+    if (status === STATUS_ACCOUNT.ACTIVE) {
+      return this.prisma.user.update({
+        where: { id },
+        data: { status },
+        include: USER_WITH_ROLES_INCLUDE,
+      });
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const user = await tx.user.update({
+        where: { id },
+        data: { status },
+        include: USER_WITH_ROLES_INCLUDE,
+      });
+      await revokeUserSessions(tx, id);
+
+      return user;
     });
   }
 }

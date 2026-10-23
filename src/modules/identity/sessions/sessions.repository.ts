@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import type { UserSession } from '@generated/prisma/client';
 import { PrismaService } from '@/database/prisma.service';
 import type { UserWithRoles } from '../users/presenters/user.presenter';
+import { revokeUserSessions } from './session-revocation';
 
 export type SessionWithUser = UserSession & { user: UserWithRoles };
 
@@ -92,20 +93,8 @@ export class SessionsRepository {
     });
   }
 
-  async revokeAllForUser(
-    userId: string,
-    exceptSessionId?: string,
-  ): Promise<number> {
-    const result = await this.prisma.userSession.updateMany({
-      where: {
-        userId,
-        revokedAt: null,
-        ...(exceptSessionId && { id: { not: exceptSessionId } }),
-      },
-      data: { revokedAt: new Date() },
-    });
-
-    return result.count;
+  revokeAllForUser(userId: string, exceptSessionId?: string): Promise<number> {
+    return revokeUserSessions(this.prisma, userId, exceptSessionId);
   }
 
   listActiveForUser(userId: string): Promise<UserSession[]> {

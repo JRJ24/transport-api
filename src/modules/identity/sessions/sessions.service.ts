@@ -9,7 +9,7 @@ import {
 import type { ConfigType } from '@nestjs/config';
 import { randomUUID } from 'crypto';
 import type { UserSession } from '@generated/prisma/client';
-import { ROLES } from '@generated/prisma/enums';
+import { ROLES, STATUS_ACCOUNT } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { addDuration } from '@/common/utils/date.util';
@@ -103,6 +103,20 @@ export class SessionsService {
         code: ERROR_CODES.INVALID_REFRESH_TOKEN,
         message: 'Session is no longer valid',
       });
+    }
+
+    // A blocked or inactive account loses this session for good, so it does
+    // not come back if the account is reactivated. Same codes as login.
+    if (session.user.status !== STATUS_ACCOUNT.ACTIVE) {
+      await this.repository.revoke(session.id);
+      throw new ForbiddenException(
+        session.user.status === STATUS_ACCOUNT.BLOCKED
+          ? { code: ERROR_CODES.ACCOUNT_BLOCKED, message: 'Account is blocked' }
+          : {
+              code: ERROR_CODES.ACCOUNT_INACTIVE,
+              message: 'Account is not active',
+            },
+      );
     }
 
     const ttl = this.refreshTtlFor(session.platform ?? undefined);
