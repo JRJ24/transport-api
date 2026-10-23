@@ -1,15 +1,11 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '@/database/prisma.service';
+import { TtlCache } from '@/common/utils/ttl-cache.util';
 import { GoogleRoutesService } from '@/integrations/google-maps/google-routes.service';
 import type {
   ComputedRoute,
   LatLng,
 } from '@/integrations/google-maps/interfaces/route.interface';
-
-interface CacheEntry {
-  route: ComputedRoute;
-  expiresAt: number;
-}
 
 /**
  * Computes and caches the driving route for an order based on its stops. The
@@ -19,7 +15,10 @@ interface CacheEntry {
 @Injectable()
 export class OrderRouteService {
   private static readonly TTL_MS = 10 * 60 * 1000;
-  private readonly cache = new Map<string, CacheEntry>();
+  private readonly cache = new TtlCache<ComputedRoute>(
+    OrderRouteService.TTL_MS,
+    500,
+  );
 
   constructor(
     private readonly prisma: PrismaService,
@@ -30,11 +29,10 @@ export class OrderRouteService {
     orderId: string,
     forceRefresh = false,
   ): Promise<ComputedRoute> {
-    const now = Date.now();
     if (!forceRefresh) {
       const cached = this.cache.get(orderId);
-      if (cached && cached.expiresAt > now) {
-        return cached.route;
+      if (cached) {
+        return cached;
       }
     }
 
@@ -60,10 +58,7 @@ export class OrderRouteService {
       intermediates: points.slice(1, -1),
     });
 
-    this.cache.set(orderId, {
-      route,
-      expiresAt: now + OrderRouteService.TTL_MS,
-    });
+    this.cache.set(orderId, route);
 
     return route;
   }
