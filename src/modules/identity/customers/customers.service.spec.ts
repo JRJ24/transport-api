@@ -142,3 +142,45 @@ describe('CustomersService.updateProfile fiscal identity (LOG-API-003)', () => {
     });
   });
 });
+
+describe('CustomersService.deactivateFromTms revokes sessions (SEC-API-019)', () => {
+  it('revokes the customer sessions inside the deactivation transaction and audits the count', async () => {
+    const tx = {
+      user: { update: jest.fn().mockResolvedValue({}) },
+      userSession: { updateMany: jest.fn().mockResolvedValue({ count: 3 }) },
+      customerProfile: {
+        findUniqueOrThrow: jest.fn().mockResolvedValue(companyA),
+      },
+      auditLog: { create: jest.fn().mockResolvedValue({}) },
+    };
+    const prisma = {
+      $transaction: jest.fn((fn: (client: typeof tx) => unknown) => fn(tx)),
+      customerProfile: {
+        findUnique: jest.fn().mockResolvedValue({
+          ...companyA,
+          user: { id: 'user-c1', status: 'ACTIVE' },
+        }),
+      },
+    };
+    const service = new CustomersService(
+      prisma as unknown as PrismaService,
+      {} as ConfigType<typeof authConfig>,
+    );
+
+    await service.deactivateFromTms('admin-1', 'cust-1');
+
+    expect(tx.userSession.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({
+          userId: 'user-c1',
+          revokedAt: null,
+        }) as unknown,
+      }),
+    );
+    expect(tx.auditLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        newValues: expect.objectContaining({ revokedSessions: 3 }) as unknown,
+      }) as unknown,
+    });
+  });
+});

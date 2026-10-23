@@ -15,6 +15,7 @@ import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { AuthenticatedUser } from '@/common/interfaces/authenticated-user.interface';
 import { hashPassword } from '@/common/utils/hash.util';
 import { PrismaService } from '@/database/prisma.service';
+import { revokeUserSessions } from '@/modules/identity/sessions/session-revocation';
 import { PresenceService } from '../presence/presence.service';
 import type { CreateDriverDto } from './dto/create-driver.dto';
 import type { DriverQueryDto } from './dto/driver-query.dto';
@@ -344,6 +345,7 @@ export class DriversService {
         where: { id: driver.userId },
         data: { status: STATUS_ACCOUNT.INACTIVE },
       });
+      const revokedSessions = await revokeUserSessions(tx, driver.userId);
       await tx.vehicle.updateMany({
         where: { driverId: id },
         data: { status: STATUS_VEHICLE.SUSPENDED },
@@ -363,6 +365,7 @@ export class DriversService {
           newValues: {
             availabilityStatus: STATUS_DRIVER.SUSPENDED,
             userStatus: STATUS_ACCOUNT.INACTIVE,
+            revokedSessions,
           },
           ipAddress: null,
           userAgent: null,

@@ -29,6 +29,7 @@ import {
 } from '@/common/utils/pagination.util';
 import { authConfig } from '@/config';
 import { PrismaService } from '@/database/prisma.service';
+import { revokeUserSessions } from '../sessions/session-revocation';
 import type { CreateCustomerAddressDto } from './dto/create-customer-address.dto';
 import type { CreateCustomerProfileDto } from './dto/create-customer-profile.dto';
 import type { CreateTmsCustomerDto } from './dto/create-tms-customer.dto';
@@ -412,6 +413,7 @@ export class CustomersService {
         where: { id: existing.userId },
         data: { status: STATUS_ACCOUNT.INACTIVE },
       });
+      const revokedSessions = await revokeUserSessions(tx, existing.userId);
       const profile = await tx.customerProfile.findUniqueOrThrow({
         where: { id },
         include: {
@@ -428,7 +430,7 @@ export class CustomersService {
           entityType: 'CUSTOMER',
           entityId: id,
           oldValues: { userStatus: existing.user.status },
-          newValues: { userStatus: STATUS_ACCOUNT.INACTIVE },
+          newValues: { userStatus: STATUS_ACCOUNT.INACTIVE, revokedSessions },
           ipAddress: null,
           userAgent: null,
           createdAt: new Date(),
