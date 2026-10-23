@@ -50,6 +50,7 @@ export class SessionsRepository {
   /**
    * Atomic refresh-token rotation: succeeds only when the presented hash is
    * still the current one, so two concurrent refreshes can never both win.
+   * Keeps the replaced hash and the rotation time for the reuse grace window.
    * Returns the number of updated rows (0 = stale/reused token).
    */
   async rotateRefreshToken(input: {
@@ -57,6 +58,7 @@ export class SessionsRepository {
     currentHash: string;
     nextHash: string;
     expiresAt: Date;
+    rotatedAt: Date;
   }): Promise<number> {
     const result = await this.prisma.userSession.updateMany({
       where: {
@@ -66,6 +68,8 @@ export class SessionsRepository {
       },
       data: {
         refreshTokenHash: input.nextHash,
+        previousRefreshTokenHash: input.currentHash,
+        refreshRotatedAt: input.rotatedAt,
         expiresAt: input.expiresAt,
         lastActivityAt: new Date(),
       },

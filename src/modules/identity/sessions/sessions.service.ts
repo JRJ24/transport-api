@@ -89,7 +89,9 @@ export class SessionsService {
   /**
    * Rotating refresh: verifies the token, requires it to be the CURRENT one
    * for a live session, then atomically replaces it. Presenting an already
-   * rotated token is treated as theft/replay and revokes the whole session.
+   * rotated token is treated as theft/replay and revokes the whole session,
+   * except for the immediately previous token inside the grace window: that
+   * is a concurrent refresh (two tabs, retries) and gets the current token.
    */
   async rotateSession(refreshToken: string): Promise<RotatedSession> {
     const payload = await this.tokenService.verifyRefreshToken(refreshToken);
@@ -104,20 +106,34 @@ export class SessionsService {
     }
 
     const ttl = this.refreshTtlFor(session.platform ?? undefined);
+    // Signing with an explicit iat makes the token reproducible for the grace path.
+    const issuedAt = Math.floor(Date.now() / 1000);
     const nextRefreshToken = await this.tokenService.signRefreshToken({
       userId: session.userId,
       sessionId: session.id,
       ttl,
+      issuedAt,
     });
+    const presentedHash = sha256(refreshToken);
 
     const rotated = await this.repository.rotateRefreshToken({
       sessionId: session.id,
-      currentHash: sha256(refreshToken),
+      currentHash: presentedHash,
       nextHash: sha256(nextRefreshToken),
       expiresAt: addDuration(new Date(), ttl),
+      rotatedAt: new Date(issuedAt * 1000),
     });
 
     if (rotated === 0) {
+      const graceToken = await this.currentTokenWithinGrace(
+        session.id,
+        presentedHash,
+      );
+
+      if (graceToken) {
+        return { session, refreshToken: graceToken };
+      }
+
       await this.repository.revoke(session.id);
       this.logger.warn(
         `Refresh token reuse detected for session ${session.id} (user ${session.userId}); session revoked`,
@@ -129,6 +145,56 @@ export class SessionsService {
     }
 
     return { session, refreshToken: nextRefreshToken };
+  }
+
+  /**
+   * Returns the CURRENT refresh token when `presentedHash` is the token it
+   * replaced and the rotation happened within the grace window; null when the
+   * grace does not apply. The current token is never stored: it is re-signed
+   * with its original iat (HS256 is deterministic) and checked against the
+   * stored hash. Read-only, so concurrent grace requests are idempotent.
+   */
+  private async currentTokenWithinGrace(
+    sessionId: string,
+    presentedHash: string,
+  ): Promise<string | null> {
+    const graceMs = this.auth.refreshReuseGraceSeconds * 1000;
+    const session = await this.repository.findById(sessionId);
+
+    if (
+      graceMs <= 0 ||
+      !session ||
+      session.revokedAt ||
+      session.expiresAt <= new Date() ||
+      !session.refreshRotatedAt ||
+      session.previousRefreshTokenHash !== presentedHash ||
+      Date.now() - session.refreshRotatedAt.getTime() > graceMs
+    ) {
+      return null;
+    }
+
+    const currentToken = await this.tokenService.signRefreshToken({
+      userId: session.userId,
+      sessionId: session.id,
+      ttl: this.refreshTtlFor(session.platform ?? undefined),
+      issuedAt: Math.floor(session.refreshRotatedAt.getTime() / 1000),
+    });
+
+    if (sha256(currentToken) !== session.refreshTokenHash) {
+      // Secret or TTL changed mid-window: refuse, but this is not theft.
+      this.logger.warn(
+        `Refresh grace for session ${session.id} could not reproduce the current token`,
+      );
+      throw new UnauthorizedException({
+        code: ERROR_CODES.INVALID_REFRESH_TOKEN,
+        message: 'Session is no longer valid',
+      });
+    }
+
+    this.logger.debug(
+      `Concurrent refresh within grace for session ${session.id}`,
+    );
+    return currentToken;
   }
 
   findValidWithUser(sessionId: string): Promise<SessionWithUser | null> {
