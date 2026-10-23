@@ -266,22 +266,40 @@ export class DriversService {
         (role) => role === ROLES.ADMIN || role === ROLES.OPERATOR,
       )
     ) {
-      const driver = await this.prisma.driverProfile.findFirst({
-        where: { userId: user.id },
-        select: { id: true, verificationStatus: true },
+      const selfServiceStatuses: STATUS_DRIVER[] = [
+        STATUS_DRIVER.AVAILABLE,
+        STATUS_DRIVER.OFFLINE,
+      ];
+      if (!selfServiceStatuses.includes(dto.availabilityStatus)) {
+        throw new ForbiddenException({
+          code: ERROR_CODES.FORBIDDEN,
+          message:
+            'Drivers can only set their availability to AVAILABLE or OFFLINE',
+        });
+      }
+
+      const driver = await this.prisma.$transaction(async (tx) => {
+        // Recheck ownership, approval and availability in the write itself:
+        // a concurrent suspension or assignment must not be overwritten.
+        const changed = await tx.driverProfile.updateMany({
+          where: {
+            id,
+            userId: user.id,
+            verificationStatus: VERIFICATION_STATUS.APPROVED,
+            availabilityStatus: { in: selfServiceStatuses },
+          },
+          data: { availabilityStatus: dto.availabilityStatus },
+        });
+        if (changed.count !== 1) {
+          throw new ForbiddenException({
+            code: ERROR_CODES.FORBIDDEN,
+            message:
+              'Only your approved, AVAILABLE or OFFLINE profile can change availability',
+          });
+        }
+        return tx.driverProfile.findUniqueOrThrow({ where: { id } });
       });
-      if (!driver || driver.id !== id) {
-        throw new ForbiddenException({
-          code: ERROR_CODES.FORBIDDEN,
-          message: 'You cannot update another driver profile',
-        });
-      }
-      if (driver.verificationStatus !== VERIFICATION_STATUS.APPROVED) {
-        throw new ForbiddenException({
-          code: ERROR_CODES.FORBIDDEN,
-          message: 'Driver profile is pending approval',
-        });
-      }
+      return this.syncPresence(driver);
     }
 
     const driver = await this.prisma.driverProfile.update({
