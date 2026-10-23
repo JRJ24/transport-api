@@ -164,3 +164,174 @@ describe('OrderRouteService bounded cache (REN-API-009)', () => {
     });
   });
 });
+
+describe('OrderRouteService missing coordinates (FIA-API-017)', () => {
+  const NEGATIVE_TTL_MS = 2 * 60 * 1000;
+  type Point = { latitude: number | null; longitude: number | null };
+  const validStops = (): Point[] => [
+    { latitude: 18.48, longitude: -69.93 },
+    { latitude: 18.49, longitude: -69.92 },
+    { latitude: 18.5, longitude: -69.91 },
+  ];
+  const incompleteStops = () => {
+    const stops = validStops();
+    stops[0].latitude = null;
+    return stops;
+  };
+  const expectInvalid = async (
+    service: OrderRouteService,
+    orderId = 'order-1',
+    forceRefresh = false,
+  ) => {
+    await expect(
+      service.getForOrder(orderId, forceRefresh),
+    ).rejects.toMatchObject({
+      status: 422,
+      response: { code: 'ROUTE_NOT_FOUND' },
+    });
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2026-10-23T12:00:00Z'));
+  });
+  afterEach(() => jest.useRealTimers());
+
+  describe('US1: no invented locations or partial routes', () => {
+    it.each(
+      [0, 1, 2].flatMap((position) =>
+        (['latitude', 'longitude'] as const).map((field) => ({
+          position,
+          field,
+        })),
+      ),
+    )(
+      'rejects missing $field at stop $position without calling Google',
+      async ({ position, field }) => {
+        const { service, findMany, computeRoute } = setup();
+        const stops = validStops();
+        stops[position][field] = null;
+        findMany.mockResolvedValue(stops);
+        await expectInvalid(service);
+        expect(computeRoute).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      { latitude: NaN, longitude: -69.93 },
+      { latitude: 18.48, longitude: Infinity },
+      { latitude: 91, longitude: -69.93 },
+      { latitude: -91, longitude: -69.93 },
+      { latitude: 18.48, longitude: 181 },
+      { latitude: 18.48, longitude: -181 },
+    ])(
+      'rejects an invalid coordinate pair %j without Google',
+      async (point) => {
+        const { service, findMany, computeRoute } = setup();
+        findMany.mockResolvedValue([point, ...validStops()]);
+        await expectInvalid(service);
+        expect(computeRoute).not.toHaveBeenCalled();
+      },
+    );
+
+    it.each([
+      { latitude: 0, longitude: -69.93 },
+      { latitude: 18.48, longitude: 0 },
+      { latitude: 0, longitude: 0 },
+      { latitude: -90, longitude: -180 },
+      { latitude: 90, longitude: 180 },
+    ])('keeps legitimate zeros and geographic boundaries %j', async (point) => {
+      const { service, findMany, computeRoute } = setup();
+      findMany.mockResolvedValue([point, validStops()[2]]);
+      expect(await service.getForOrder('order-1')).toEqual(route);
+      expect(computeRoute).toHaveBeenCalledWith(
+        expect.objectContaining({ origin: point }),
+      );
+    });
+  });
+
+  describe('US2: bounded negative caching and recovery', () => {
+    it('reuses the rejection until two minutes and then reads corrected stops', async () => {
+      const { service, findMany, computeRoute } = setup();
+      findMany.mockResolvedValue(incompleteStops());
+      await expectInvalid(service);
+      findMany.mockResolvedValue(validStops());
+      jest.setSystemTime(Date.now() + NEGATIVE_TTL_MS - 1);
+      await expectInvalid(service);
+      expect(findMany).toHaveBeenCalledTimes(1);
+      expect(computeRoute).not.toHaveBeenCalled();
+
+      jest.setSystemTime(Date.now() + 1);
+      expect(await service.getForOrder('order-1')).toEqual(route);
+      expect(await service.getForOrder('order-1')).toEqual(route);
+      expect(findMany).toHaveBeenCalledTimes(2);
+      expect(computeRoute).toHaveBeenCalledTimes(1);
+    });
+
+    it.each(['invalidate', 'forceRefresh'])(
+      'recovers corrected stops through %s before expiry',
+      async (control) => {
+        const { service, findMany, computeRoute } = setup();
+        findMany.mockResolvedValue(incompleteStops());
+        await expectInvalid(service);
+        findMany.mockResolvedValue(validStops());
+        if (control === 'invalidate') service.invalidate('order-1');
+        expect(
+          await service.getForOrder('order-1', control === 'forceRefresh'),
+        ).toEqual(route);
+        expect(await service.getForOrder('order-1')).toEqual(route);
+        expect(findMany).toHaveBeenCalledTimes(2);
+        expect(computeRoute).toHaveBeenCalledTimes(1);
+      },
+    );
+
+    it('does not serve a stale positive route after a forced refresh finds missing coordinates', async () => {
+      const { service, findMany, computeRoute } = setup();
+      await service.getForOrder('order-1');
+      findMany.mockResolvedValue(incompleteStops());
+      await expectInvalid(service, 'order-1', true);
+      await expectInvalid(service);
+      expect(findMany).toHaveBeenCalledTimes(2);
+      expect(computeRoute).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the old coordinate rejection even if the corrected route hits a provider failure', async () => {
+      const { service, findMany, computeRoute } = setup();
+      findMany.mockResolvedValue(incompleteStops());
+      await expectInvalid(service);
+      findMany.mockResolvedValue(validStops());
+      const error = new Error('provider down');
+      computeRoute.mockRejectedValueOnce(error);
+      await expect(service.getForOrder('order-1', true)).rejects.toBe(error);
+      expect(await service.getForOrder('order-1')).toEqual(route);
+      expect(computeRoute).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps coordinate rejections isolated from other orders', async () => {
+      const { service, findMany, computeRoute } = setup();
+      findMany.mockResolvedValueOnce(incompleteStops());
+      await expectInvalid(service, 'incomplete-order');
+      expect(await service.getForOrder('valid-order')).toEqual(route);
+      service.invalidate('valid-order');
+      await expectInvalid(service, 'incomplete-order');
+      expect(computeRoute).toHaveBeenCalledTimes(1);
+      expect(findMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('evicts the oldest negative entry after 500 distinct invalid orders', async () => {
+      const { service, findMany, computeRoute } = setup();
+      findMany.mockResolvedValue(incompleteStops());
+      for (let i = 1; i <= 500; i++) {
+        await expectInvalid(service, `order-${i}`);
+      }
+      await expectInvalid(service, 'order-1');
+      expect(findMany).toHaveBeenCalledTimes(500);
+      await expectInvalid(service, 'order-501');
+      await expectInvalid(service, 'order-2');
+      expect(findMany).toHaveBeenCalledTimes(501);
+      await expectInvalid(service, 'order-1');
+      expect(findMany).toHaveBeenCalledTimes(502);
+      expect(computeRoute).not.toHaveBeenCalled();
+    });
+  });
+});

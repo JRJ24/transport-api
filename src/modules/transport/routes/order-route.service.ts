@@ -1,4 +1,9 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
+import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import { PrismaService } from '@/database/prisma.service';
 import { TtlCache } from '@/common/utils/ttl-cache.util';
 import { GoogleRoutesService } from '@/integrations/google-maps/google-routes.service';
@@ -20,6 +25,11 @@ export class OrderRouteService {
     500,
   );
 
+  private readonly invalidCoordinatesCache = new TtlCache<true>(
+    2 * 60 * 1000,
+    500,
+  );
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly googleRoutes: GoogleRoutesService,
@@ -30,6 +40,9 @@ export class OrderRouteService {
     forceRefresh = false,
   ): Promise<ComputedRoute> {
     if (!forceRefresh) {
+      if (this.invalidCoordinatesCache.get(orderId)) {
+        throw this.invalidCoordinatesError();
+      }
       const cached = this.cache.get(orderId);
       if (cached) {
         return cached;
@@ -47,10 +60,29 @@ export class OrderRouteService {
       );
     }
 
-    const points: LatLng[] = stops.map((stop) => ({
-      latitude: Number(stop.latitude),
-      longitude: Number(stop.longitude),
-    }));
+    const points: LatLng[] = [];
+    for (const stop of stops) {
+      const latitude = stop.latitude === null ? NaN : Number(stop.latitude);
+      const longitude = stop.longitude === null ? NaN : Number(stop.longitude);
+      if (
+        !Number.isFinite(latitude) ||
+        !Number.isFinite(longitude) ||
+        latitude < -90 ||
+        latitude > 90 ||
+        longitude < -180 ||
+        longitude > 180
+      ) {
+        // Never omit a required stop or reuse an old route after a refresh
+        // discovers that its coordinates are incomplete.
+        this.cache.delete(orderId);
+        this.invalidCoordinatesCache.set(orderId, true);
+        throw this.invalidCoordinatesError();
+      }
+      points.push({ latitude, longitude });
+    }
+    // A corrected order must not retain its old coordinate rejection if
+    // the provider fails while computing the new route.
+    this.invalidCoordinatesCache.delete(orderId);
 
     const route = await this.googleRoutes.computeRoute({
       origin: points[0],
@@ -58,6 +90,7 @@ export class OrderRouteService {
       intermediates: points.slice(1, -1),
     });
 
+    this.invalidCoordinatesCache.delete(orderId);
     this.cache.set(orderId, route);
 
     return route;
@@ -65,5 +98,13 @@ export class OrderRouteService {
 
   invalidate(orderId: string): void {
     this.cache.delete(orderId);
+    this.invalidCoordinatesCache.delete(orderId);
+  }
+
+  private invalidCoordinatesError(): UnprocessableEntityException {
+    return new UnprocessableEntityException({
+      code: ERROR_CODES.ROUTE_NOT_FOUND,
+      message: 'Order stops require valid coordinates to compute a route',
+    });
   }
 }
