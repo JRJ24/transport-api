@@ -1,4 +1,4 @@
-import { createHash, randomInt } from 'crypto';
+import { createHash, randomInt, timingSafeEqual } from 'crypto';
 import {
   BadRequestException,
   ConflictException,
@@ -157,17 +157,31 @@ export class AccountService {
       },
       orderBy: { createdAt: 'desc' },
     });
-    if (!request || request.attempts >= EMAIL_CODE_MAX_ATTEMPTS) {
+    // Reserve the attempt before comparing: a conditional increment, so
+    // parallel guesses cannot all read the same counter and all be evaluated.
+    const attempt = request
+      ? await this.prisma.emailChangeRequest.updateMany({
+          where: {
+            id: request.id,
+            consumedAt: null,
+            attempts: { lt: EMAIL_CODE_MAX_ATTEMPTS },
+          },
+          data: { attempts: { increment: 1 } },
+        })
+      : { count: 0 };
+    if (!request || attempt.count === 0) {
       throw new BadRequestException({
         code: ERROR_CODES.BAD_REQUEST,
         message: 'The code expired; request a new one',
       });
     }
-    if (request.codeHash !== hashCode(code)) {
-      await this.prisma.emailChangeRequest.update({
-        where: { id: request.id },
-        data: { attempts: { increment: 1 } },
-      });
+    // Both are SHA-256 hex digests (32 bytes), so the lengths always match.
+    if (
+      !timingSafeEqual(
+        Buffer.from(request.codeHash, 'hex'),
+        Buffer.from(hashCode(code), 'hex'),
+      )
+    ) {
       throw new BadRequestException({
         code: ERROR_CODES.BAD_REQUEST,
         message: 'The code is not correct',
@@ -179,10 +193,17 @@ export class AccountService {
       where: { id: user.id },
       select: { email: true },
     });
-    await this.prisma.emailChangeRequest.update({
-      where: { id: request.id },
+    // Consume the code once: of two simultaneous right answers only one wins.
+    const consumed = await this.prisma.emailChangeRequest.updateMany({
+      where: { id: request.id, consumedAt: null },
       data: { consumedAt: new Date() },
     });
+    if (consumed.count === 0) {
+      throw new BadRequestException({
+        code: ERROR_CODES.BAD_REQUEST,
+        message: 'The code expired; request a new one',
+      });
+    }
     await this.applyEmail(user.id, account.email, request.newEmail);
     return { status: 'CHANGED', email: request.newEmail };
   }
