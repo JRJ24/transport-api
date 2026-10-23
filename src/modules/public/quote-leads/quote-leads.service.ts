@@ -323,20 +323,15 @@ export class QuoteLeadsService {
   }
 
   private async ensureCustomerRole(tx: TxClient, userId: string): Promise<void> {
-    const role = await tx.userRole.findFirst({
-      where: { userID: userId, rol: { code: ROLES.CUSTOMER } },
+    const role = await tx.role.findUniqueOrThrow({
+      where: { code: ROLES.CUSTOMER },
       select: { id: true },
     });
 
-    if (role) {
-      return;
-    }
-
-    await tx.userRole.create({
-      data: {
-        user: { connect: { id: userId } },
-        rol: { connect: { code: ROLES.CUSTOMER } },
-      },
+    // Unique (user, role) index: a concurrent conversion cannot duplicate it.
+    await tx.userRole.createMany({
+      data: [{ userID: userId, roleID: role.id }],
+      skipDuplicates: true,
     });
   }
 

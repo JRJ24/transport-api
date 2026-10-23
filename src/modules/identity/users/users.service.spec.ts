@@ -1,5 +1,5 @@
 import type { ConfigType } from '@nestjs/config';
-import { STATUS_ACCOUNT } from '@generated/prisma/enums';
+import { ROLES, STATUS_ACCOUNT } from '@generated/prisma/enums';
 import type { authConfig } from '@/config';
 import type { PrismaService } from '@/database/prisma.service';
 import { UsersService } from './users.service';
@@ -71,5 +71,31 @@ describe('UsersService.setStatus revokes sessions (SEC-API-019)', () => {
     await expect(
       service.setStatus('u1', STATUS_ACCOUNT.BLOCKED),
     ).rejects.toThrow('db down');
+  });
+});
+
+describe('UsersService.create with repeated roles (FIA-API-011)', () => {
+  it('creates each role once even if the list repeats one', async () => {
+    const create = jest.fn().mockResolvedValue({ id: 'u1', userRoles: [] });
+    const service = new UsersService(
+      { user: { create } } as unknown as PrismaService,
+      { bcryptSaltRounds: 4 } as ConfigType<typeof authConfig>,
+    );
+
+    await service.create({
+      fullName: 'Ana',
+      email: 'ana@x.com',
+      phone: '+18095550000',
+      password: 'Secret123',
+      roles: [ROLES.ADMIN, ROLES.ADMIN, ROLES.OPERATOR],
+    });
+
+    const [{ data }] = create.mock.calls[0] as [
+      { data: { userRoles: { create: unknown[] } } },
+    ];
+    expect(data.userRoles.create).toEqual([
+      { rol: { connect: { code: ROLES.ADMIN } } },
+      { rol: { connect: { code: ROLES.OPERATOR } } },
+    ]);
   });
 });
