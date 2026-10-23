@@ -28,16 +28,11 @@ export class RolesService {
   async assign(userId: string, code: ROLES): Promise<void> {
     const role = await this.getByCode(code);
 
-    const existing = await this.prisma.userRole.findFirst({
-      where: { userID: userId, roleID: role.id },
-    });
-
-    if (existing) {
-      return;
-    }
-
-    await this.prisma.userRole.create({
-      data: { userID: userId, roleID: role.id },
+    // INSERT … ON CONFLICT DO NOTHING on the (user, role) unique index: a
+    // double click or two admins at once leave a single assignment.
+    await this.prisma.userRole.createMany({
+      data: [{ userID: userId, roleID: role.id }],
+      skipDuplicates: true,
     });
   }
 

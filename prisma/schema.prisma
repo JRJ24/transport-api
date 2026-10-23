@@ -428,6 +428,7 @@ model UserRole {
   user User @relation("USERS", fields: [userID], references: [id])
   rol  Role @relation("ROLES", fields: [roleID], references: [id])
 
+  @@unique([userID, roleID])
   @@map("user_roles")
   @@schema("AUTH")
 }

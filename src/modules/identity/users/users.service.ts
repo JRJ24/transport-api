@@ -93,7 +93,7 @@ export class UsersService {
         phone: input.phone.trim(),
         passwordHash,
         userRoles: {
-          create: input.roles.map((code) => ({
+          create: uniqueRoles(input.roles).map((code) => ({
             rol: { connect: { code } },
           })),
         },
@@ -118,7 +118,7 @@ export class UsersService {
           phone: input.phone.trim(),
           passwordHash,
           userRoles: {
-            create: input.roles.map((code) => ({
+            create: uniqueRoles(input.roles).map((code) => ({
               rol: { connect: { code } },
             })),
           },
@@ -215,6 +215,11 @@ export class UsersService {
       return user;
     });
   }
+}
+
+/** A role listed twice would hit the (user, role) unique index. */
+function uniqueRoles(roles: ROLES[]): ROLES[] {
+  return [...new Set(roles)];
 }
 
 function optionalString(value: string | undefined): string | null {
