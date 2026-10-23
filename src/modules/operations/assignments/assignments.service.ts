@@ -210,7 +210,7 @@ export class AssignmentsService {
       return [];
     }
 
-    return this.prisma.orderAssignment.findMany({
+    const assignments = await this.prisma.orderAssignment.findMany({
       where: { driverId: driver.id },
       include: {
         order: { include: { orderStops: true, orderItems: true } },
@@ -218,6 +218,26 @@ export class AssignmentsService {
         vehicle: true,
       },
       orderBy: { assignedAt: 'desc' },
+    });
+
+    return assignments.map((assignment) => {
+      if (
+        ACTIVE_ASSIGNMENT_STATUSES.includes(assignment.assignmentStatus) &&
+        ACTIVE_ORDER_STATUSES.includes(assignment.order.status)
+      ) {
+        return assignment;
+      }
+      // Historical rows keep their summary, but no longer grant access to
+      // contacts, exact locations, cargo details or free-text notes.
+      return {
+        ...assignment,
+        order: {
+          ...assignment.order,
+          orderStops: [],
+          orderItems: [],
+          notes: '',
+        },
+      };
     });
   }
 
