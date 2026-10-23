@@ -26,12 +26,55 @@ async function setup(options: { smtp?: boolean; emailTaken?: boolean } = {}) {
     },
     auditLog: { create: jest.fn().mockResolvedValue({}) },
     emailChangeRequest: {
-      updateMany: jest.fn().mockReturnValue({}),
+      // Conditional writes on the stored request, like Postgres updateMany:
+      // only applies (and counts) when every condition in `where` holds.
+      updateMany: jest.fn(
+        ({
+          where,
+          data,
+        }: {
+          where: {
+            id?: string;
+            consumedAt?: null;
+            attempts?: { lt: number };
+          };
+          data: {
+            attempts?: { increment: number };
+            consumedAt?: Date;
+          };
+        }) => {
+          const request = storedRequest as {
+            id: string;
+            attempts: number;
+            consumedAt?: Date | null;
+          } | null;
+          const matches =
+            request !== null &&
+            (where.id === undefined || where.id === request.id) &&
+            (where.consumedAt === undefined || !request.consumedAt) &&
+            (where.attempts === undefined ||
+              request.attempts < where.attempts.lt);
+          if (!matches) {
+            return Promise.resolve({ count: 0 });
+          }
+          if (data.attempts) {
+            request.attempts += data.attempts.increment;
+          }
+          if (data.consumedAt) {
+            request.consumedAt = data.consumedAt;
+          }
+          return Promise.resolve({ count: 1 });
+        },
+      ),
       create: jest.fn(({ data }: { data: Record<string, unknown> }) => {
         storedRequest = { id: 'req-1', attempts: 0, ...data };
         return storedRequest;
       }),
-      findFirst: jest.fn(() => Promise.resolve(storedRequest)),
+      // Yields first, so parallel confirmations interleave like real queries.
+      findFirst: jest.fn(async () => {
+        await new Promise((resolve) => setImmediate(resolve));
+        return storedRequest ? { ...storedRequest } : null;
+      }),
       update: jest.fn().mockResolvedValue({}),
     },
     $transaction: jest.fn((ops: unknown[]) => Promise.all(ops)),
@@ -179,5 +222,72 @@ describe('AccountService.setAvatar', () => {
     await expect(service.setAvatar(user, undefined, req)).rejects.toThrow(
       /Attach an image/,
     );
+  });
+});
+
+describe('AccountService email code attempts under concurrency (SEC-API-020)', () => {
+  async function codeSent() {
+    const ctx = await setup({ smtp: true });
+    await ctx.service.requestEmailChange(
+      user,
+      'nuevo@empresa.com',
+      'OldPass123',
+    );
+    const right = ctx.sent[0].code;
+    const wrong = right === '000000' ? '111111' : '000000';
+    // The request the mock keeps; updateMany mutates this same object.
+    const stored = () =>
+      (ctx.prisma.emailChangeRequest.create as jest.Mock).mock.results[0]
+        .value as { attempts: number };
+    return { ...ctx, right, wrong, stored };
+  }
+
+  const messages = (results: PromiseSettledResult<unknown>[]) =>
+    results
+      .map((result) =>
+        result.status === 'rejected'
+          ? (result.reason as Error).message
+          : 'CHANGED',
+      )
+      .sort();
+
+  it('evaluates only one of two parallel wrong codes when one attempt is left', async () => {
+    const { service, wrong, stored } = await codeSent();
+    stored().attempts = 4;
+
+    const results = await Promise.allSettled([
+      service.confirmEmailChange(user, wrong),
+      service.confirmEmailChange(user, wrong),
+    ]);
+
+    expect(messages(results)).toEqual([
+      'The code expired; request a new one',
+      'The code is not correct',
+    ]);
+    expect(stored().attempts).toBe(5);
+  });
+
+  it('refuses even the right code once the five attempts are used', async () => {
+    const { service, right, stored } = await codeSent();
+    stored().attempts = 5;
+
+    await expect(service.confirmEmailChange(user, right)).rejects.toThrow(
+      'The code expired; request a new one',
+    );
+  });
+
+  it('applies a right code only once when it is confirmed twice at once', async () => {
+    const { service, prisma, right } = await codeSent();
+
+    const results = await Promise.allSettled([
+      service.confirmEmailChange(user, right),
+      service.confirmEmailChange(user, right),
+    ]);
+
+    expect(messages(results)).toEqual([
+      'CHANGED',
+      'The code expired; request a new one',
+    ]);
+    expect(prisma.user.update).toHaveBeenCalledTimes(1);
   });
 });
