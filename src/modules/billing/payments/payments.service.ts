@@ -330,12 +330,14 @@ export class PaymentsService {
     this.assertOrderAcceptsPayment(order, user);
     this.assertOrderNotAlreadyDispatchable(order);
 
-    const amount = this.payableAmount(order, dto.amount);
+    // Fail fast on a request that cannot fit; re-checked under the lock.
+    this.payableAmount(order, dto.amount);
     const receivedAt = dto.receivedAt ?? new Date();
     const providerReference = `check:${dto.bankName.trim()}:${dto.checkNumber.trim()}`;
 
     const [payment, transaction] = await this.prisma.$transaction(
       async (tx) => {
+        const amount = await this.lockAndPrice(tx, order.id, user, dto.amount);
         const payment = await tx.payment.create({
           data: {
             orderId: order.id,
@@ -435,8 +437,9 @@ export class PaymentsService {
     this.assertOrderAcceptsPayment(order, user);
     this.assertOrderNotAlreadyDispatchable(order);
 
-    const amount = this.payableAmount(order, dto.amount);
-    const nextBalance = Number(account.balanceUsed) + amount;
+    // Fail-fast estimate; the authorized amount is recomputed under the lock.
+    const estimatedAmount = this.payableAmount(order, dto.amount);
+    const nextBalance = Number(account.balanceUsed) + estimatedAmount;
 
     if (nextBalance > Number(account.creditLimit)) {
       throw new ConflictException({
@@ -448,6 +451,7 @@ export class PaymentsService {
     const providerReference = `credit:${order.orderCode}`;
     const [payment, transaction] = await this.prisma.$transaction(
       async (tx) => {
+        const amount = await this.lockAndPrice(tx, order.id, user, dto.amount);
         const payment = await tx.payment.create({
           data: {
             orderId: order.id,
@@ -988,6 +992,66 @@ export class PaymentsService {
     }
 
     return order;
+  }
+
+  /**
+   * Serializes payment authorizations on one order: holds the order row lock
+   * until the transaction ends, so a concurrent check or credit waits and
+   * then sees the payment this one wrote. Raw SQL because Prisma has no
+   * `FOR UPDATE`; the id goes in as a bound parameter.
+   */
+  private async lockOrderForPayment(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ): Promise<void> {
+    await tx.$queryRaw`SELECT id FROM "ORDERS"."TransportOrders" WHERE id = ${orderId} FOR UPDATE`;
+  }
+
+  /** Order state and payments as of now, read under lockOrderForPayment. */
+  private async reloadPayableOrder(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+  ) {
+    const order = await tx.transportOrder.findUnique({
+      where: { id: orderId },
+      select: {
+        status: true,
+        paymentStatus: true,
+        totalAmount: true,
+        payments: {
+          select: { amount: true, paymentMethod: true, status: true },
+        },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException({
+        code: ERROR_CODES.RESOURCE_NOT_FOUND,
+        message: 'Order not found',
+      });
+    }
+
+    return order;
+  }
+
+  /**
+   * Locks the order and re-runs the payment checks on fresh data; returns the
+   * amount to authorize. The checks done before the transaction only fail
+   * fast, these are the ones that hold under concurrency.
+   */
+  private async lockAndPrice(
+    tx: Prisma.TransactionClient,
+    orderId: string,
+    user: AuthenticatedUser,
+    requestedAmount?: number,
+  ): Promise<number> {
+    await this.lockOrderForPayment(tx, orderId);
+    const order = await this.reloadPayableOrder(tx, orderId);
+
+    this.assertOrderAcceptsPayment(order, user);
+    this.assertOrderNotAlreadyDispatchable(order);
+
+    return this.payableAmount(order, requestedAmount);
   }
 
   private assertOrderAcceptsPayment(
