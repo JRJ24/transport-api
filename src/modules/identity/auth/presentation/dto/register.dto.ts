@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform } from 'class-transformer';
 import {
+  IsByteLength,
   IsEmail,
   IsEnum,
   IsIn,
@@ -12,6 +13,7 @@ import {
   MinLength,
 } from 'class-validator';
 import { DOCUMENT_TYPE, TYPE_CUSTOMER } from '@generated/prisma/enums';
+import { PASSWORD_MAX_BYTES } from '@/common/constants/password.constant';
 import { CLIENT_PLATFORMS, type ClientPlatform } from './login.dto';
 
 export class RegisterDto {
@@ -36,12 +38,14 @@ export class RegisterDto {
 
   @ApiProperty({
     minLength: 8,
-    maxLength: 72,
+    maxLength: PASSWORD_MAX_BYTES,
     description: 'At least 8 characters, with letters and numbers',
   })
   @IsString()
   @MinLength(8)
-  @MaxLength(72)
+  @IsByteLength(0, PASSWORD_MAX_BYTES, {
+    message: `$property must not exceed ${PASSWORD_MAX_BYTES} bytes`,
+  })
   @Matches(/^(?=.*[A-Za-z])(?=.*\d).+$/, {
     message: 'password must contain at least one letter and one number',
   })
