@@ -1,15 +1,6 @@
 import { createHash } from 'crypto';
 import * as bcrypt from 'bcrypt';
 
-/**
- * Valid bcrypt hash of a random value, compared against when the user does
- * not exist so login timing does not reveal whether an email is registered.
- */
-export const DUMMY_PASSWORD_HASH: string = bcrypt.hashSync(
-  'dummy-password-for-timing-equalization',
-  12,
-);
-
 export function hashPassword(plain: string, rounds: number): Promise<string> {
   return bcrypt.hash(plain, rounds);
 }

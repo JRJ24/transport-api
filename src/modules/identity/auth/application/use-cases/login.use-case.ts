@@ -1,12 +1,16 @@
 import {
   ForbiddenException,
+  Inject,
   Injectable,
+  type OnModuleInit,
   UnauthorizedException,
 } from '@nestjs/common';
+import type { ConfigType } from '@nestjs/config';
 import { STATUS_ACCOUNT } from '@generated/prisma/enums';
 import { ERROR_CODES } from '@/common/constants/error-codes.constant';
 import type { RequestContext } from '@/common/interfaces/request-context.interface';
-import { DUMMY_PASSWORD_HASH, verifyPassword } from '@/common/utils/hash.util';
+import { hashPassword, verifyPassword } from '@/common/utils/hash.util';
+import { authConfig } from '@/config';
 import { UsersService } from '../../../users/users.service';
 import type { AuthResult } from '../../domain/auth-result.interface';
 import type { LoginDto } from '../../presentation/dto/login.dto';
@@ -14,12 +18,28 @@ import { AUTH_AUDIT_ACTIONS, AuthAuditService } from '../auth-audit.service';
 import { AuthSessionIssuer } from '../auth-session.issuer';
 
 @Injectable()
-export class LoginUseCase {
+export class LoginUseCase implements OnModuleInit {
+  /**
+   * Valid hash of a throwaway value, compared against when the user does not
+   * exist so login timing does not reveal whether an email is registered. Same
+   * cost as real hashes (BCRYPT_SALT_ROUNDS), or the timings would differ.
+   */
+  private dummyPasswordHash = '';
+
   constructor(
     private readonly usersService: UsersService,
     private readonly sessionIssuer: AuthSessionIssuer,
     private readonly audit: AuthAuditService,
+    @Inject(authConfig.KEY)
+    private readonly auth: ConfigType<typeof authConfig>,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    this.dummyPasswordHash = await hashPassword(
+      'dummy-password-for-timing-equalization',
+      this.auth.bcryptSaltRounds,
+    );
+  }
 
   async execute(dto: LoginDto, context: RequestContext): Promise<AuthResult> {
     const user = await this.usersService.findByEmailWithRoles(dto.email);
@@ -28,7 +48,7 @@ export class LoginUseCase {
     // timing does not reveal which emails are registered.
     const passwordMatches = await verifyPassword(
       dto.password,
-      user?.passwordHash ?? DUMMY_PASSWORD_HASH,
+      user?.passwordHash ?? this.dummyPasswordHash,
     );
 
     if (!user || !passwordMatches) {
