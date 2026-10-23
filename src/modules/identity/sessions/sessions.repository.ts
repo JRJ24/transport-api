@@ -31,16 +31,21 @@ export class SessionsRepository {
   }
 
   /**
-   * Loads a session only when it is still valid (not revoked, not expired),
-   * together with the user and their roles — used on every authenticated
-   * request by the JWT strategy.
+   * Loads a session only when it is still valid (not revoked, not expired,
+   * created after `createdAfter`: the absolute lifetime cap), together with
+   * the user and their roles — used on every authenticated request by the JWT
+   * strategy.
    */
-  findValidWithUser(id: string): Promise<SessionWithUser | null> {
+  findValidWithUser(
+    id: string,
+    createdAfter: Date,
+  ): Promise<SessionWithUser | null> {
     return this.prisma.userSession.findFirst({
       where: {
         id,
         revokedAt: null,
         expiresAt: { gt: new Date() },
+        createdAt: { gt: createdAfter },
       },
       include: {
         user: { include: { userRoles: { include: { rol: true } } } },
@@ -97,12 +102,16 @@ export class SessionsRepository {
     return revokeUserSessions(this.prisma, userId, exceptSessionId);
   }
 
-  listActiveForUser(userId: string): Promise<UserSession[]> {
+  listActiveForUser(
+    userId: string,
+    createdAfter: Date,
+  ): Promise<UserSession[]> {
     return this.prisma.userSession.findMany({
       where: {
         userId,
         revokedAt: null,
         expiresAt: { gt: new Date() },
+        createdAt: { gt: createdAfter },
       },
       orderBy: { lastActivityAt: 'desc' },
     });

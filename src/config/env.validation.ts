@@ -35,6 +35,8 @@ export const envSchema = z
     JWT_ACCESS_TTL: z.string().regex(DURATION_PATTERN).default('15m'),
     JWT_REFRESH_TTL_MOBILE: z.string().regex(DURATION_PATTERN).default('30d'),
     JWT_REFRESH_TTL_WEB: z.string().regex(DURATION_PATTERN).default('7d'),
+    // Absolute cap from login: refreshing never keeps a session alive longer.
+    JWT_SESSION_MAX_AGE: z.string().regex(DURATION_PATTERN).default('90d'),
     // Seconds the immediately previous refresh token stays usable after a
     // rotation, so concurrent refreshes are not treated as theft. 0 disables it.
     JWT_REFRESH_REUSE_GRACE_SECONDS: z.coerce

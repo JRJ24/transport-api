@@ -109,3 +109,23 @@ describe('envSchema REALTIME_SESSION_CHECK_SEC', () => {
     ]);
   });
 });
+
+describe('envSchema JWT_SESSION_MAX_AGE', () => {
+  it('caps sessions at 90 days by default', () => {
+    const result = envSchema.safeParse(base);
+    expect(result.success).toBe(true);
+    expect(result.data?.JWT_SESSION_MAX_AGE).toBe('90d');
+  });
+
+  it('accepts another duration', () => {
+    const result = envSchema.safeParse({ ...base, JWT_SESSION_MAX_AGE: '60d' });
+    expect(result.success).toBe(true);
+    expect(result.data?.JWT_SESSION_MAX_AGE).toBe('60d');
+  });
+
+  it('rejects a value that is not a duration', () => {
+    const result = envSchema.safeParse({ ...base, JWT_SESSION_MAX_AGE: 'abc' });
+    expect(result.success).toBe(false);
+    expect(result.error?.issues[0].path).toEqual(['JWT_SESSION_MAX_AGE']);
+  });
+});
