@@ -372,6 +372,29 @@ describe('PaymentsService settled CardNET payments (LOG-API-002)', () => {
     expect(tx.transportOrder.update).not.toHaveBeenCalled();
   });
 
+  it('captures once when the return URL and /verify settle the same payment at once (FIA-API-003)', async () => {
+    const { service, tx, row, dispatchTrigger } = setup(
+      STATUS_ORDERS.PENDING_PAYMENT,
+    );
+
+    // Both requests read the payment while it is still PROCESSING and both
+    // get '00' from CardNET; only the first conditional write may win.
+    const receipts = await Promise.all([
+      service.verifyCardnetPaymentBySession('sess-1'),
+      service.verifyCardnetPaymentBySession('sess-1'),
+    ]);
+
+    expect(receipts.map((receipt) => receipt.status)).toEqual([
+      PAYMENT_STATUS.PAID,
+      PAYMENT_STATUS.PAID,
+    ]);
+    expect(row.status).toBe(PAYMENT_STATUS.PAID);
+    expect(tx.payment.updateMany).toHaveBeenCalledTimes(2);
+    expect(tx.paymentTransaction.create).toHaveBeenCalledTimes(1);
+    expect(tx.transportOrder.update).toHaveBeenCalledTimes(1);
+    expect(dispatchTrigger.orderMaybeDispatchable).toHaveBeenCalledTimes(1);
+  });
+
   it('does not let a late cancel redirect turn PAID into CANCELLED', async () => {
     const { service, prisma, tx, row } = setup(STATUS_ORDERS.PENDING_PAYMENT);
     // The cancel read the payment while it was still PROCESSING...
