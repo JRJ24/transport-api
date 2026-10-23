@@ -10,7 +10,12 @@ import type { ConfigType } from '@nestjs/config';
 import { HttpAdapterHost } from '@nestjs/core';
 import { JwtService } from '@nestjs/jwt';
 import type { DriverLocation } from '@generated/prisma/client';
-import { ASSIGNMENT_STATUS, ROLES } from '@generated/prisma/enums';
+import {
+  ASSIGNMENT_STATUS,
+  ROLES,
+  STATUS_ACCOUNT,
+  VERIFICATION_STATUS,
+} from '@generated/prisma/enums';
 import { Server, type Socket } from 'socket.io';
 import { TokenType } from '@/common/enums/token-type.enum';
 import { permissionsForRoles } from '@/common/enums/permission.enum';
@@ -27,7 +32,10 @@ import {
 import { RuntimeSettingsService } from '@/modules/administration/settings/runtime-settings.service';
 
 /** Perfil del conductor de una conexion, consultado una vez y compartido. */
-type DriverLookup = () => Promise<{ id: string } | null>;
+type DriverLookup = () => Promise<{
+  id: string;
+  verificationStatus: VERIFICATION_STATUS;
+} | null>;
 
 /**
  * Asignaciones que dejan a un conductor entrar a order:{id}. REJECTED y
@@ -53,10 +61,15 @@ interface TrackingLocationPayload {
   recordedAt?: string;
 }
 
+/** Session ids per query when revalidating connected sockets. */
+const REVALIDATION_BATCH_SIZE = 500;
+
 @Injectable()
 export class RealtimeService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(RealtimeService.name);
   private io?: Server;
+  private revalidationTimer?: ReturnType<typeof setInterval>;
+  private revalidating = false;
 
   constructor(
     private readonly adapterHost: HttpAdapterHost,
@@ -100,11 +113,76 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.io.on('connection', (socket) => this.handleConnection(socket));
+    this.startSessionRevalidation();
     this.logger.log('Socket.IO tracking gateway started');
   }
 
   async onModuleDestroy(): Promise<void> {
+    clearInterval(this.revalidationTimer);
+    this.revalidationTimer = undefined;
     await this.io?.close();
+  }
+
+  /**
+   * Cuts the sockets of this replica whose session was revoked or expired, or
+   * whose account is no longer ACTIVE: the handshake is the only other check,
+   * and logout, logout-all or blocking an account never reach a live socket.
+   * One batched query per round; a failed round disconnects nobody.
+   */
+  async revalidateConnectedSessions(): Promise<void> {
+    if (!this.io || this.revalidating) {
+      return;
+    }
+    this.revalidating = true;
+
+    try {
+      const sockets = [...this.io.of('/').sockets.values()];
+      const sessionIds = [
+        ...new Set(
+          sockets.map(
+            (socket) => (socket.data.user as AuthenticatedUser).sessionId,
+          ),
+        ),
+      ];
+      const valid = new Set<string>();
+
+      for (let i = 0; i < sessionIds.length; i += REVALIDATION_BATCH_SIZE) {
+        const rows = await this.prisma.userSession.findMany({
+          where: {
+            id: { in: sessionIds.slice(i, i + REVALIDATION_BATCH_SIZE) },
+            revokedAt: null,
+            expiresAt: { gt: new Date() },
+            user: { status: STATUS_ACCOUNT.ACTIVE },
+          },
+          select: { id: true },
+        });
+        rows.forEach((row) => valid.add(row.id));
+      }
+
+      for (const socket of sockets) {
+        const { sessionId } = socket.data.user as AuthenticatedUser;
+        if (valid.has(sessionId)) {
+          continue;
+        }
+        socket.emit('auth:session-ended', { reason: 'SESSION_ENDED' });
+        socket.disconnect(true);
+        this.logger.debug(`Socket disconnected: session ${sessionId} ended`);
+      }
+    } catch (error) {
+      this.logger.warn(
+        `Socket session revalidation failed: ${error instanceof Error ? error.message : 'unknown'}`,
+      );
+    } finally {
+      this.revalidating = false;
+    }
+  }
+
+  private startSessionRevalidation(): void {
+    this.revalidationTimer = setInterval(
+      () => void this.revalidateConnectedSessions(),
+      this.auth.realtimeSessionCheckSeconds * 1000,
+    );
+    this.revalidationTimer.unref();
   }
 
   emitLocation(location: DriverLocation): void {
@@ -316,10 +394,13 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
    * no negarle las rooms a uno creado despues de conectar ni fijar un error.
    */
   private memoizedDriverLookup(user: AuthenticatedUser): DriverLookup {
-    let pending: Promise<{ id: string } | null> | null = null;
+    let pending: ReturnType<DriverLookup> | null = null;
     return () => {
       pending ??= this.prisma.driverProfile
-        .findFirst({ where: { userId: user.id }, select: { id: true } })
+        .findFirst({
+          where: { userId: user.id },
+          select: { id: true, verificationStatus: true },
+        })
         .then(
           (driver) => {
             if (!driver) {
@@ -346,8 +427,13 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
       // Si el socket se cerro mientras tanto, unirlo dejaria su id colgado
       // en las rooms del adapter.
       if (driver && socket.connected) {
+        // driver:{id} always: revokeOrderRoom needs it to pull the driver out
+        // of an order. The request pool only for approved drivers, the same
+        // rule DriverVerificationGuard applies over HTTP.
         void socket.join(`driver:${driver.id}`);
-        void socket.join('drivers:requests');
+        if (driver.verificationStatus === VERIFICATION_STATUS.APPROVED) {
+          void socket.join('drivers:requests');
+        }
       }
     } catch (error) {
       this.logger.error(
@@ -505,6 +591,15 @@ export class RealtimeService implements OnModuleInit, OnModuleDestroy {
 
     if (!session || session.userId !== payload.sub) {
       throw new Error('Socket session is no longer valid');
+    }
+
+    // Same rule as AccountStatusGuard: a blocked or inactive account keeps no
+    // realtime channel even with an access token that has not expired yet.
+    if (session.user.status === STATUS_ACCOUNT.BLOCKED) {
+      throw new Error('Account is blocked');
+    }
+    if (session.user.status !== STATUS_ACCOUNT.ACTIVE) {
+      throw new Error('Account is not active');
     }
 
     const roles = session.user.userRoles.map((userRole) => userRole.rol.code);
