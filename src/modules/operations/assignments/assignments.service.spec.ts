@@ -225,3 +225,210 @@ describe('AssignmentsService lock order', () => {
     expect(tx.orderAssignment.updateMany).not.toHaveBeenCalled();
   });
 });
+
+describe('AssignmentsService.listMine privacy (SEC-API-008)', () => {
+  const viewer = { id: 'driver-user', roles: ['DRIVER'] } as AuthenticatedUser;
+  const activeAssignments = [
+    ASSIGNMENT_STATUS.PENDING,
+    ASSIGNMENT_STATUS.ACCEPTED,
+  ];
+  const activeOrders: STATUS_ORDERS[] = [
+    STATUS_ORDERS.ASSIGNED,
+    STATUS_ORDERS.ACCEPTED,
+    STATUS_ORDERS.IN_PROGRESS,
+  ];
+
+  function row(
+    assignmentStatus: ASSIGNMENT_STATUS,
+    status: STATUS_ORDERS = STATUS_ORDERS.ASSIGNED,
+    id = 'asg-1',
+  ) {
+    return {
+      id,
+      orderId: `order-${id}`,
+      driverId: 'd1',
+      vehicleId: 'v1',
+      assignedAt: new Date('2026-10-23T12:00:00Z'),
+      assignedBy: null,
+      acceptedAt: null,
+      rejectedAt: null,
+      assignmentStatus,
+      order: {
+        id: `order-${id}`,
+        orderCode: `ORD-${id}`,
+        customerId: 'customer-1',
+        vehicleCategoryId: 'category-1',
+        serviceType: 'INMEDIATE',
+        status,
+        totalAmount: 1200,
+        paymentStatus: 'PAID',
+        notes: 'Call Private Person at 809-555-0199, Secret Street 123',
+        orderStops: [
+          {
+            contactName: 'Private Person',
+            contactPhone: '809-555-0199',
+            addressLine: 'Secret Street 123',
+            city: 'Santo Domingo',
+            province: 'Distrito Nacional',
+            latitude: 18.4861,
+            longitude: -69.9312,
+            instructions: 'Gate code 2468',
+          },
+        ],
+        orderItems: [{ description: 'Private cargo details', quantity: 1 }],
+      },
+      driver: { id: 'd1', user: { id: viewer.id } },
+      vehicle: { id: 'v1' },
+    };
+  }
+  type Row = ReturnType<typeof row>;
+
+  function setupListMine(rows: Row[], noProfile = false) {
+    const prisma = {
+      driverProfile: {
+        findFirst: jest.fn().mockResolvedValue(noProfile ? null : { id: 'd1' }),
+      },
+      orderAssignment: { findMany: jest.fn().mockResolvedValue(rows) },
+    };
+    const service = new AssignmentsService(
+      prisma as unknown as PrismaService,
+      {} as NotificationDispatcherService,
+      {} as RealtimeService,
+      {} as PresenceService,
+      { autoOffer: 'off' } as ReturnType<typeof matchingConfig>,
+    );
+    const list = async (user = viewer) =>
+      (await service.listMine(user)) as Row[];
+    return { prisma, service, list };
+  }
+
+  function expectPrivateDetailsHidden(actual: Row, original: Row) {
+    expect(actual).toMatchObject({
+      id: original.id,
+      assignmentStatus: original.assignmentStatus,
+      assignedAt: original.assignedAt,
+      order: {
+        id: original.order.id,
+        orderCode: original.order.orderCode,
+        status: original.order.status,
+        totalAmount: original.order.totalAmount,
+        orderStops: [],
+        orderItems: [],
+        notes: '',
+      },
+    });
+    const serialized = JSON.stringify(actual);
+    for (const secret of [
+      'Private Person',
+      '809-555-0199',
+      'Secret Street 123',
+      'Gate code 2468',
+      '18.4861',
+      '-69.9312',
+      'Private cargo details',
+    ]) {
+      expect(serialized).not.toContain(secret);
+    }
+  }
+
+  describe('US1: historical assignments no longer disclose contact details', () => {
+    it.each([
+      ASSIGNMENT_STATUS.REJECTED,
+      ASSIGNMENT_STATUS.CANCELLED,
+      ASSIGNMENT_STATUS.COMPLETED,
+    ])('redacts %s while keeping the historical summary', async (status) => {
+      const original = row(status);
+      const { list } = setupListMine([original]);
+      const [result] = await list();
+      expectPrivateDetailsHidden(result, original);
+    });
+
+    it.each(
+      Object.values(STATUS_ORDERS).filter(
+        (status) => !activeOrders.includes(status),
+      ),
+    )('redacts an ACCEPTED assignment when the order is %s', async (status) => {
+      const original = row(ASSIGNMENT_STATUS.ACCEPTED, status);
+      const { list } = setupListMine([original]);
+      expectPrivateDetailsHidden((await list())[0], original);
+    });
+
+    it('also redacts a PENDING assignment on a cancelled order', async () => {
+      const original = row(ASSIGNMENT_STATUS.PENDING, STATUS_ORDERS.CANCELLED);
+      const { list } = setupListMine([original]);
+      expectPrivateDetailsHidden((await list())[0], original);
+    });
+
+    it('does not bypass privacy for a driver with an additional staff role', async () => {
+      const original = row(ASSIGNMENT_STATUS.REJECTED);
+      const { list } = setupListMine([original]);
+      const result = await list({ ...viewer, roles: ['DRIVER', 'ADMIN'] });
+      expectPrivateDetailsHidden(result[0], original);
+    });
+  });
+
+  describe('US2: preserve active work and the history contract', () => {
+    it.each(
+      activeAssignments.flatMap((assignment) =>
+        activeOrders.map((order) => [assignment, order] as const),
+      ),
+    )(
+      'keeps operational details for %s on a %s order',
+      async (assignment, order) => {
+        const original = row(assignment, order);
+        const { list } = setupListMine([original]);
+        expect((await list())[0]).toEqual(original);
+      },
+    );
+
+    it('preserves row order and metadata without mutating the original rows', async () => {
+      const rows = [
+        row(ASSIGNMENT_STATUS.REJECTED, STATUS_ORDERS.ASSIGNED, 'newest'),
+        row(ASSIGNMENT_STATUS.ACCEPTED, STATUS_ORDERS.IN_PROGRESS, 'current'),
+        row(ASSIGNMENT_STATUS.COMPLETED, STATUS_ORDERS.DELIVERED, 'oldest'),
+      ];
+      const snapshots = structuredClone(rows);
+      const { list } = setupListMine(rows);
+      const result = await list();
+      expect(result.map((item) => item.id)).toEqual([
+        'newest',
+        'current',
+        'oldest',
+      ]);
+      expectPrivateDetailsHidden(result[0], snapshots[0]);
+      expect(result[1]).toEqual(snapshots[1]);
+      expectPrivateDetailsHidden(result[2], snapshots[2]);
+      expect(result.map((item) => ({ ...item, order: undefined }))).toEqual(
+        snapshots.map((item) => ({ ...item, order: undefined })),
+      );
+      expect(rows).toEqual(snapshots);
+    });
+
+    it('queries only the authenticated driver in the existing descending order', async () => {
+      const { list, prisma } = setupListMine([]);
+      await list();
+      expect(prisma.driverProfile.findFirst).toHaveBeenCalledWith({
+        where: { userId: viewer.id },
+      });
+      expect(prisma.orderAssignment.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { driverId: 'd1' },
+          orderBy: { assignedAt: 'desc' },
+        }),
+      );
+    });
+
+    it('returns an empty list without a profile', async () => {
+      const { list, prisma } = setupListMine([], true);
+      expect(await list()).toEqual([]);
+      expect(prisma.orderAssignment.findMany).not.toHaveBeenCalled();
+    });
+
+    it('keeps the administrative listing untouched', async () => {
+      const original = row(ASSIGNMENT_STATUS.REJECTED);
+      const { service, prisma } = setupListMine([original]);
+      expect(await service.list()).toEqual([original]);
+      expect(prisma.driverProfile.findFirst).not.toHaveBeenCalled();
+    });
+  });
+});
