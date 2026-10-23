@@ -28,13 +28,13 @@ export class PermissionsGuard implements CanActivate {
       .getRequest<{ user?: AuthenticatedUser }>();
     const user = request.user;
 
-    if (!user) {
-      return true;
-    }
-
-    const hasAll = requiredPermissions.every((permission) =>
-      user.permissions.includes(permission),
-    );
+    // Fail closed: a route that requires permissions is never open without a
+    // user, even if it also got marked @Public() by mistake.
+    const hasAll =
+      !!user &&
+      requiredPermissions.every((permission) =>
+        user.permissions.includes(permission),
+      );
 
     if (!hasAll) {
       throw new ForbiddenException({

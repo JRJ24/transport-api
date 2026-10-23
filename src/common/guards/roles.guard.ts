@@ -29,11 +29,10 @@ export class RolesGuard implements CanActivate {
       .getRequest<{ user?: AuthenticatedUser }>();
     const user = request.user;
 
-    if (!user) {
-      return true;
-    }
-
-    const hasRole = requiredRoles.some((role) => user.roles.includes(role));
+    // Fail closed: a route that requires a role is never open without a user,
+    // even if it also got marked @Public() by mistake.
+    const hasRole =
+      !!user && requiredRoles.some((role) => user.roles.includes(role));
 
     if (!hasRole) {
       throw new ForbiddenException({
